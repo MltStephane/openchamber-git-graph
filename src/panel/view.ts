@@ -1,5 +1,6 @@
 import type { GraphRow } from '../graph.ts';
 import type { Ref } from '../log-format.ts';
+import { t, type MessageKey } from './i18n.ts';
 
 /** Height of one commit row, in CSS px. The dot sits in its middle. */
 export const ROW = 26;
@@ -115,16 +116,17 @@ export const drawDot = (lane: number): SVGSVGElement => {
   return svg;
 };
 
-const REF_TITLE: Record<Ref['kind'], string> = {
-  head: 'HEAD détaché',
-  local: 'Branche locale',
-  remote: 'Branche distante',
-  tag: 'Tag',
+const REF_TITLE: Record<Ref['kind'], MessageKey> = {
+  head: 'ref.head',
+  local: 'ref.local',
+  remote: 'ref.remote',
+  tag: 'ref.tag',
 };
 
 export const refBadge = (ref: Ref): HTMLElement => {
-  const badge = element('span', `ref ${ref.current && ref.kind === 'local' ? 'current' : ref.kind}`, ref.current && ref.kind === 'local' ? `HEAD → ${ref.name}` : ref.name);
-  badge.title = ref.current && ref.kind === 'local' ? `Branche courante : ${ref.name}` : `${REF_TITLE[ref.kind]} : ${ref.name}`;
+  const isCurrent = ref.current && ref.kind === 'local';
+  const badge = element('span', `ref ${isCurrent ? 'current' : ref.kind}`, isCurrent ? `HEAD → ${ref.name}` : ref.name);
+  badge.title = t('common.labelled', { label: t(isCurrent ? 'ref.current' : REF_TITLE[ref.kind]), value: ref.name });
   return badge;
 };
 

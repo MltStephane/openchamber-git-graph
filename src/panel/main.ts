@@ -3,6 +3,7 @@ import { applyHostReady, mountBanner, mountButton, mountEmpty, mountSearchField,
 
 import { layoutGraph, type GraphLayout } from '../graph.ts';
 import type { Commit } from '../log-format.ts';
+import { resolveLocale, setLocale, t, type MessageKey, type MessageParams } from './i18n.ts';
 import { drawDot, drawRowGraph, element, graphWidth, MAX_LANES, refBadge, STYLE } from './view.ts';
 
 const PAGE = 500;
@@ -12,12 +13,12 @@ const RELOAD_MAX = 2000;
 type Scope = 'all' | 'current';
 type Head = { branch: string | null; sha: string | null; dirty: boolean; changes: number };
 type LogPage = { commits: Commit[]; hasMore: boolean };
+/** Texts are kept as keys so a locale change repaints them; `detail` is the raw, untranslated cause. */
 type Problem =
   | { kind: 'no-project' }
-  | { kind: 'not-a-repo'; message: string }
+  | { kind: 'not-a-repo'; message: MessageKey }
   | { kind: 'no-service' }
-  | { kind: 'service-failed'; message: string }
-  | { kind: 'error'; title: string; message: string };
+  | { kind: 'error'; title: MessageKey; message: MessageKey; params?: MessageParams; detail?: string };
 
 const host = connectHost();
 const root = document.querySelector<HTMLElement>('#root');
@@ -38,7 +39,7 @@ const isObject = (value: unknown): value is Record<string, unknown> => typeof va
 const ask = async (path: string, query: Record<string, string>): Promise<unknown> => {
   const result = await host.serviceRequest({ method: 'GET', path, query });
   let body: unknown;
-  try { body = JSON.parse(result.body); } catch { throw new ServiceError('bad-answer', `Réponse illisible du service (HTTP ${result.status}).`); }
+  try { body = JSON.parse(result.body); } catch { throw new ServiceError('bad-answer', `Unparsable body (HTTP ${result.status})`); }
   if (result.status !== 200) {
     const code = isObject(body) && typeof body.error === 'string' ? body.error : 'http';
     const message = isObject(body) && typeof body.message === 'string' ? body.message : `HTTP ${result.status}`;
@@ -49,7 +50,7 @@ const ask = async (path: string, query: Record<string, string>): Promise<unknown
 
 const readLog = async (dir: string, scope: Scope, limit: number, skip: number): Promise<LogPage> => {
   const body = await ask('/log', { dir, scope, limit: String(limit), skip: String(skip) });
-  if (!isObject(body) || !Array.isArray(body.commits)) throw new ServiceError('bad-answer', 'Réponse inattendue du service.');
+  if (!isObject(body) || !Array.isArray(body.commits)) throw new ServiceError('bad-answer', 'Unexpected /log payload');
   return { commits: body.commits as Commit[], hasMore: body.hasMore === true };
 };
 
@@ -62,25 +63,42 @@ const readHead = async (dir: string): Promise<Head | null> => {
   }
 };
 
+/** Service codes whose raw message adds nothing to the translated one. */
+const SERVICE_MESSAGE = new Map<string, MessageKey>([
+  ['unauthorized', 'error.unauthorized'],
+  ['not-found', 'error.notFound'],
+  ['bad-request', 'error.badRequest'],
+  ['no-git', 'error.noGit'],
+]);
+/** Service codes whose raw message is the only real explanation, kept as detail. */
+const SERVICE_MESSAGE_WITH_DETAIL = new Map<string, MessageKey>([
+  ['git-failed', 'error.gitFailed'],
+  ['bad-answer', 'error.badAnswer'],
+  ['http', 'error.http'],
+]);
+
 const toProblem = (error: unknown): Problem => {
   if (error instanceof ServiceError) {
-    if (error.code === 'not-a-repo' || error.code === 'no-directory') return { kind: 'not-a-repo', message: error.message };
-    return { kind: 'error', title: 'Le service git a échoué', message: error.message };
+    if (error.code === 'not-a-repo') return { kind: 'not-a-repo', message: 'error.notARepo.message' };
+    if (error.code === 'no-directory') return { kind: 'not-a-repo', message: 'error.noDirectory.message' };
+    const message = SERVICE_MESSAGE.get(error.code);
+    if (message) return { kind: 'error', title: 'error.service.title', message };
+    return { kind: 'error', title: 'error.service.title', message: SERVICE_MESSAGE_WITH_DETAIL.get(error.code) ?? 'error.serviceUnknown', detail: error.message };
   }
   if (error instanceof HostRequestError) {
     if (error.code === 'NO_SERVICE') return { kind: 'no-service' };
-    if (error.code === 'SERVICE_FAILED') return { kind: 'service-failed', message: error.message };
-    if (error.code === 'DISABLED') return { kind: 'error', title: 'Extension en pause', message: 'Réactivez-la dans Settings → Extensions.' };
-    if (error.code === 'HOST_TIMEOUT') return { kind: 'error', title: 'Délai dépassé', message: 'Le service git n’a pas répondu à temps. Réessayez.' };
-    return { kind: 'error', title: `Erreur ${error.code}`, message: error.message };
+    if (error.code === 'SERVICE_FAILED') return { kind: 'error', title: 'error.serviceFailed.title', message: 'error.serviceFailed.message', detail: error.message };
+    if (error.code === 'DISABLED') return { kind: 'error', title: 'error.disabled.title', message: 'error.disabled.message' };
+    if (error.code === 'HOST_TIMEOUT') return { kind: 'error', title: 'error.timeout.title', message: 'error.timeout.message' };
+    return { kind: 'error', title: 'error.host.title', message: 'error.host.message', params: { code: error.code }, detail: error.message };
   }
-  return { kind: 'error', title: 'Erreur inattendue', message: error instanceof Error ? error.message : String(error) };
+  return { kind: 'error', title: 'error.unexpected.title', message: 'error.unexpected.message', detail: error instanceof Error ? error.message : String(error) };
 };
 
 // ----- State -----
 
 let directory: string | null = null;
-let locale = 'fr';
+let locale = resolveLocale(undefined);
 let scope: Scope = 'all';
 let query = '';
 let commits: Commit[] = [];
@@ -108,7 +126,7 @@ toolbar.append(element('span', 'grow'));
 const refreshRoot = toolbar.appendChild(element('div'));
 
 const tabs = mountTabs(tabsRoot, {
-  items: [{ id: 'all', label: 'Toutes les branches' }, { id: 'current', label: 'Branche courante' }],
+  items: [],
   activeId: scope,
   onChange: (next) => {
     if (next !== 'all' && next !== 'current') return;
@@ -120,7 +138,6 @@ const tabs = mountTabs(tabsRoot, {
 
 const search = mountSearchField(searchRoot, {
   value: query,
-  placeholder: 'Filtrer par sujet ou auteur',
   onChange: (next) => {
     query = next;
     search.update({ value: next });
@@ -130,7 +147,7 @@ const search = mountSearchField(searchRoot, {
 });
 
 const refresh = mountButton(refreshRoot, {
-  label: 'Rafraîchir', variant: 'ghost', size: 'xs', onClick: () => { void load({ keepCount: true }); },
+  label: '', variant: 'ghost', size: 'xs', onClick: () => { void load({ keepCount: true }); },
 });
 
 // ----- Loading -----
@@ -186,7 +203,10 @@ const loadMore = async () => {
   } catch (error) {
     if (current !== generation) return;
     const failure = toProblem(error);
-    void host.toast({ kind: 'error', message: failure.kind === 'error' ? `${failure.title} : ${failure.message}` : 'Impossible de charger plus de commits.' });
+    const message = failure.kind === 'error'
+      ? t('common.labelled', { label: t(failure.title, failure.params), value: t(failure.message) })
+      : t('loadMore.failed');
+    void host.toast({ kind: 'error', message });
   } finally {
     if (current === generation) loadingMore = false;
   }
@@ -205,49 +225,48 @@ const clearNotice = () => {
 const renderNotice = () => {
   clearNotice();
   if (loading && commits.length === 0) {
-    mountedNotice.push(mountSpinner(notice, { label: starting ? 'Démarrage du service local…' : 'Lecture de l’historique…' }));
+    mountedNotice.push(mountSpinner(notice, { label: t(starting ? 'notice.starting' : 'notice.reading') }));
     return;
   }
   if (!problem) {
     if (!loading && commits.length === 0 && directory) {
-      mountedNotice.push(mountEmpty(notice, { title: 'Aucun commit', body: 'Ce dépôt n’a pas encore d’historique.' }));
+      mountedNotice.push(mountEmpty(notice, { title: t('empty.noCommits.title'), body: t('empty.noCommits.body') }));
     }
     return;
   }
-  const retry = { label: 'Réessayer', onClick: () => { void load({ keepCount: false }); } };
+  const retry = { label: t('common.retry'), onClick: () => { void load({ keepCount: false }); } };
   switch (problem.kind) {
     case 'no-project':
-      mountedNotice.push(mountEmpty(notice, { title: 'Aucun projet ouvert', body: 'Ouvrez un projet dans OpenChamber pour voir son historique git.' }));
+      mountedNotice.push(mountEmpty(notice, { title: t('empty.noProject.title'), body: t('empty.noProject.body') }));
       break;
     case 'not-a-repo':
-      mountedNotice.push(mountEmpty(notice, { title: 'Pas un dépôt git', body: `${directory ?? ''}\n${problem.message}`, action: retry }));
+      mountedNotice.push(mountEmpty(notice, { title: t('error.notARepo.title'), body: `${directory ?? ''}\n${t(problem.message)}`, action: retry }));
       break;
     case 'no-service':
       mountedNotice.push(mountBanner(notice, {
-        tone: 'warning', title: 'Service local non autorisé',
-        body: 'Cette extension lit l’historique via un service local. Autorisez-le dans Settings → Extensions, puis réessayez.',
+        tone: 'warning', title: t('error.noService.title'), body: t('error.noService.body'),
         action: retry,
       }));
       break;
-    case 'service-failed':
-      mountedNotice.push(mountBanner(notice, { tone: 'error', title: 'Le service local a planté ou n’a pas démarré', body: problem.message, action: retry }));
+    case 'error': {
+      const message = t(problem.message);
+      const body = problem.detail ? `${message}\n${problem.detail}` : message;
+      mountedNotice.push(mountBanner(notice, { tone: 'error', title: t(problem.title, problem.params), body, action: retry }));
       break;
-    case 'error':
-      mountedNotice.push(mountBanner(notice, { tone: 'error', title: problem.title, body: problem.message, action: retry }));
-      break;
+    }
   }
 };
 
 const renderHead = () => {
   headInfo.replaceChildren();
   if (!head || problem) return;
-  const label = head.branch ?? (head.sha ? `HEAD détaché @ ${head.sha.slice(0, 7)}` : 'aucun commit');
+  const label = head.branch ?? (head.sha ? t('head.detached', { sha: head.sha.slice(0, 7) }) : t('head.noCommit'));
   const branch = element('span', 'branch', label);
   branch.title = head.sha ?? '';
   headInfo.append(element('span', '', '⎇'), branch);
   if (head.dirty) {
-    const dirty = element('span', 'dirty', `● ${head.changes} modif${head.changes > 1 ? 's' : ''}`);
-    dirty.title = 'Modifications non commitées dans la copie de travail';
+    const dirty = element('span', 'dirty', `● ${t('head.changes', { count: head.changes })}`);
+    dirty.title = t('head.dirtyTitle');
     headInfo.append(dirty);
   }
 };
@@ -269,20 +288,20 @@ const absoluteDate = (timestamp: number): string => new Date(timestamp * 1000).t
 const openCommit = (commit: Commit) => {
   void host.openCommit(commit.hash).catch((error: unknown) => {
     const message = error instanceof HostRequestError
-      ? error.code === 'NOT_FOUND' ? 'Ce commit est introuvable dans le projet ouvert.'
-        : error.code === 'UNSUPPORTED' ? 'Cette version d’OpenChamber ne peut pas ouvrir le diff ici.'
-          : `${error.code} : ${error.message}`
-      : 'Impossible d’ouvrir le commit.';
+      ? error.code === 'NOT_FOUND' ? t('commit.notFound')
+        : error.code === 'UNSUPPORTED' ? t('commit.unsupported')
+          : t('common.labelled', { label: error.code, value: error.message })
+      : t('commit.openFailed');
     void host.toast({ kind: 'error', message });
   });
 };
 
 const copyHash = (commit: Commit, button: HTMLButtonElement) => {
   void host.writeClipboard(commit.hash).then(() => {
-    button.textContent = 'Copié';
+    button.textContent = t('copy.done');
     button.classList.add('done');
-    setTimeout(() => { button.textContent = 'Copier'; button.classList.remove('done'); }, 1200);
-  }).catch(() => { void host.toast({ kind: 'error', message: 'Impossible de copier le hash.' }); });
+    setTimeout(() => { button.textContent = t('copy.label'); button.classList.remove('done'); }, 1200);
+  }).catch(() => { void host.toast({ kind: 'error', message: t('copy.failed') }); });
 };
 
 const matches = (commit: Commit, needle: string): boolean =>
@@ -301,9 +320,9 @@ const renderRow = (commit: Commit, index: number, filtered: boolean, width: numb
     for (const ref of commit.refs) refs.append(refBadge(ref));
     row.append(refs);
   }
-  const copy = element('button', 'copy', 'Copier');
+  const copy = element('button', 'copy', t('copy.label'));
   copy.type = 'button';
-  copy.title = `Copier ${commit.hash}`;
+  copy.title = t('copy.title', { hash: commit.hash });
   copy.addEventListener('click', (event) => { event.stopPropagation(); copyHash(commit, copy); });
   copy.addEventListener('keydown', (event) => event.stopPropagation());
   row.append(
@@ -328,7 +347,7 @@ const renderList = () => {
     if (needle && !matches(commit, needle)) return;
     rows.push(renderRow(commit, index, needle !== '', width));
   });
-  if (needle && rows.length === 0 && commits.length > 0) rows.push(element('div', 'footer', 'Aucun commit chargé ne correspond au filtre.'));
+  if (needle && rows.length === 0 && commits.length > 0) rows.push(element('div', 'footer', t('list.noMatch')));
   list.replaceChildren(...rows);
 };
 
@@ -337,14 +356,22 @@ const renderFooter = () => {
   if (commits.length === 0) return;
   const needle = query.trim().toLowerCase();
   const shown = needle ? commits.filter((commit) => matches(commit, needle)).length : commits.length;
-  const count = needle ? `${shown} / ${commits.length} commits chargés` : `${commits.length} commits${hasMore ? ' chargés' : ''}`;
+  const count = needle ? t('footer.filtered', { shown, count: commits.length })
+    : t(hasMore ? 'footer.loaded' : 'footer.commits', { count: commits.length });
   footer.append(element('span', '', count));
-  if (layout.width > MAX_LANES) footer.append(element('span', '', `· ${layout.width - MAX_LANES} colonnes masquées`));
+  if (layout.width > MAX_LANES) footer.append(element('span', '', `· ${t('footer.hiddenLanes', { count: layout.width - MAX_LANES })}`));
   if (hasMore) {
     const more = element('div');
     footer.append(more);
-    mountButton(more, { label: `Charger ${PAGE} de plus`, variant: 'secondary', size: 'xs', loading: loadingMore, onClick: () => { void loadMore(); } });
+    mountButton(more, { label: t('footer.loadMore', { count: PAGE }), variant: 'secondary', size: 'xs', loading: loadingMore, onClick: () => { void loadMore(); } });
   }
+};
+
+/** Toolbar controls are mounted once; only a locale change rewrites their texts. */
+const renderLabels = () => {
+  tabs.update({ items: [{ id: 'all', label: t('tabs.all') }, { id: 'current', label: t('tabs.current') }] });
+  search.update({ placeholder: t('search.placeholder') });
+  refresh.update({ label: t('toolbar.refresh') });
 };
 
 const render = () => {
@@ -361,10 +388,11 @@ let mounted = false;
 host.onReady((context) => {
   applyHostReady(context, document.documentElement);
   document.body.dataset.surface = context.surface;
-  const nextLocale = context.locale || 'fr';
+  const nextLocale = setLocale(context.locale);
   if (mounted && nextLocale === locale) return;
   locale = nextLocale;
   mounted = true;
+  renderLabels();
   render();
 });
 
@@ -386,4 +414,5 @@ host.onSessionLifecycle((event) => {
   if (previous !== undefined && previous !== 'completed' && event.phase === 'completed') void load({ keepCount: true });
 });
 
+renderLabels();
 render();
