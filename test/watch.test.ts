@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'bun:test';
 
-import { headChange, type Head } from '../src/panel/watch.ts';
+import { headChange } from '../src/panel/watch.ts';
+import type { Head } from '../src/service-contract.ts';
 
 const HEAD: Head = { branch: 'master', sha: 'a'.repeat(40), dirty: false, changes: 0, refs: 'f1' };
 

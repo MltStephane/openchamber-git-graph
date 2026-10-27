@@ -1,24 +1,17 @@
 import { connectHost, HostRequestError } from '@openchamber/sdk';
 import { applyHostReady, mountBanner, mountButton, mountEmpty, mountSearchField, mountSpinner, mountTabs } from '@openchamber/sdk/ui';
 
-import { layoutGraph, type GraphLayout } from '../graph.ts';
+import { layoutGraph, type GraphLayout, type GraphRow } from '../graph.ts';
 import type { Commit } from '../log-format.ts';
-import { resolveLocale, setLocale, t, type MessageKey, type MessageParams } from './i18n.ts';
-import { headChange, type Head } from './watch.ts';
-import { drawDot, drawRowGraph, element, graphWidth, MAX_LANES, refBadge, STYLE } from './view.ts';
-
-const PAGE = 500;
-/** The service answers at most this many commits per call; a reload reads up to it. */
-const RELOAD_MAX = 2000;
-
-type Scope = 'all' | 'current';
-type LogPage = { commits: Commit[]; hasMore: boolean };
-/** Texts are kept as keys so a locale change repaints them; `detail` is the raw, untranslated cause. */
-type Problem =
-  | { kind: 'no-project' }
-  | { kind: 'not-a-repo'; message: MessageKey }
-  | { kind: 'no-service' }
-  | { kind: 'error'; title: MessageKey; message: MessageKey; params?: MessageParams; detail?: string };
+import { LIMIT_MAX, PAGE_SIZE, type Head, type Scope } from '../service-contract.ts';
+import { absoluteDate, relativeDate } from './dates.ts';
+import { filterCommits, type FilterResult } from './filter.ts';
+import { dotKind, graphWidth, MAX_LANES } from './graph-geometry.ts';
+import { resolveLocale, setLocale, t } from './i18n.ts';
+import { toProblem, type Problem } from './problems.ts';
+import { createServiceClient } from './service-client.ts';
+import { headChange } from './watch.ts';
+import { drawDot, drawRowGraph, element, refBadge, STYLE } from './view.ts';
 
 const host = connectHost();
 const root = document.querySelector<HTMLElement>('#root');
@@ -29,69 +22,7 @@ document.head.append(style);
 
 // ----- Service calls -----
 
-/** A failure the service itself reported, with its own code. */
-class ServiceError extends Error {
-  constructor(readonly code: string, message: string) { super(message); }
-}
-
-const isObject = (value: unknown): value is Record<string, unknown> => typeof value === 'object' && value !== null;
-
-const ask = async (path: string, query: Record<string, string>): Promise<unknown> => {
-  const result = await host.serviceRequest({ method: 'GET', path, query });
-  let body: unknown;
-  try { body = JSON.parse(result.body); } catch { throw new ServiceError('bad-answer', `Unparsable body (HTTP ${result.status})`); }
-  if (result.status !== 200) {
-    const code = isObject(body) && typeof body.error === 'string' ? body.error : 'http';
-    const message = isObject(body) && typeof body.message === 'string' ? body.message : `HTTP ${result.status}`;
-    throw new ServiceError(code, message);
-  }
-  return body;
-};
-
-const readLog = async (dir: string, scope: Scope, limit: number, skip: number): Promise<LogPage> => {
-  const body = await ask('/log', { dir, scope, limit: String(limit), skip: String(skip) });
-  if (!isObject(body) || !Array.isArray(body.commits)) throw new ServiceError('bad-answer', 'Unexpected /log payload');
-  return { commits: body.commits as Commit[], hasMore: body.hasMore === true };
-};
-
-const readHead = async (dir: string): Promise<Head> => {
-  const body = await ask('/head', { dir });
-  if (!isObject(body)) throw new ServiceError('bad-answer', 'Unexpected /head payload');
-  // A service started before `refs` existed keeps running until the host restarts it: watch HEAD and branch only.
-  return { ...body, refs: typeof body.refs === 'string' ? body.refs : '' } as Head;
-};
-
-/** Service codes whose raw message adds nothing to the translated one. */
-const SERVICE_MESSAGE = new Map<string, MessageKey>([
-  ['unauthorized', 'error.unauthorized'],
-  ['not-found', 'error.notFound'],
-  ['bad-request', 'error.badRequest'],
-  ['no-git', 'error.noGit'],
-]);
-/** Service codes whose raw message is the only real explanation, kept as detail. */
-const SERVICE_MESSAGE_WITH_DETAIL = new Map<string, MessageKey>([
-  ['git-failed', 'error.gitFailed'],
-  ['bad-answer', 'error.badAnswer'],
-  ['http', 'error.http'],
-]);
-
-const toProblem = (error: unknown): Problem => {
-  if (error instanceof ServiceError) {
-    if (error.code === 'not-a-repo') return { kind: 'not-a-repo', message: 'error.notARepo.message' };
-    if (error.code === 'no-directory') return { kind: 'not-a-repo', message: 'error.noDirectory.message' };
-    const message = SERVICE_MESSAGE.get(error.code);
-    if (message) return { kind: 'error', title: 'error.service.title', message };
-    return { kind: 'error', title: 'error.service.title', message: SERVICE_MESSAGE_WITH_DETAIL.get(error.code) ?? 'error.serviceUnknown', detail: error.message };
-  }
-  if (error instanceof HostRequestError) {
-    if (error.code === 'NO_SERVICE') return { kind: 'no-service' };
-    if (error.code === 'SERVICE_FAILED') return { kind: 'error', title: 'error.serviceFailed.title', message: 'error.serviceFailed.message', detail: error.message };
-    if (error.code === 'DISABLED') return { kind: 'error', title: 'error.disabled.title', message: 'error.disabled.message' };
-    if (error.code === 'HOST_TIMEOUT') return { kind: 'error', title: 'error.timeout.title', message: 'error.timeout.message' };
-    return { kind: 'error', title: 'error.host.title', message: 'error.host.message', params: { code: error.code }, detail: error.message };
-  }
-  return { kind: 'error', title: 'error.unexpected.title', message: 'error.unexpected.message', detail: error instanceof Error ? error.message : String(error) };
-};
+const service = createServiceClient(host);
 
 // ----- State -----
 
@@ -108,6 +39,11 @@ let loading = false;
 let loadingMore = false;
 let starting = false;
 let generation = 0;
+
+/** Forget what was read: another project, a reload or a failed read all start from nothing. */
+const resetHistory = () => {
+  commits = []; hasMore = false; head = null; layout = { rows: [], width: 0 };
+};
 
 // ----- Layout of the page -----
 
@@ -137,23 +73,22 @@ const search = mountSearchField(searchRoot, {
   onChange: (next) => {
     query = next;
     search.update({ value: next });
-    renderList();
-    renderFooter();
+    renderHistory();
   },
 });
 
 // ----- Loading -----
 
-/** Reload the first page; `keepCount` keeps as many commits as are already shown (up to RELOAD_MAX). */
+/** Reload the first page; `keepCount` keeps as many commits as are already shown (up to LIMIT_MAX). */
 const load = async ({ keepCount }: { keepCount: boolean }) => {
   const current = ++generation;
   if (!directory) {
-    commits = []; hasMore = false; head = null; problem = { kind: 'no-project' }; loading = false;
+    resetHistory(); problem = { kind: 'no-project' }; loading = false;
     render();
     return;
   }
   const dir = directory;
-  const limit = keepCount ? Math.min(Math.max(PAGE, commits.length), RELOAD_MAX) : PAGE;
+  const limit = keepCount ? Math.min(Math.max(PAGE_SIZE, commits.length), LIMIT_MAX) : PAGE_SIZE;
   loading = true;
   problem = null;
   render();
@@ -163,14 +98,14 @@ const load = async ({ keepCount }: { keepCount: boolean }) => {
     if (current !== generation) return;
     if (starting) render();
     // The header line is a bonus; the log reports the real problem.
-    const [page, nextHead] = await Promise.all([readLog(dir, scope, limit, 0), readHead(dir).catch(() => null)]);
+    const [page, nextHead] = await Promise.all([service.readLog(dir, scope, limit, 0), service.readHead(dir).catch(() => null)]);
     if (current !== generation) return;
     commits = page.commits;
     hasMore = page.hasMore;
     head = nextHead;
   } catch (error) {
     if (current !== generation) return;
-    commits = []; hasMore = false; head = null;
+    resetHistory();
     problem = toProblem(error);
   }
   loading = false;
@@ -184,9 +119,9 @@ const loadMore = async () => {
   const current = generation;
   const dir = directory;
   loadingMore = true;
-  renderFooter();
+  renderFooter(filterCommits(commits, query));
   try {
-    const page = await readLog(dir, scope, PAGE, commits.length);
+    const page = await service.readLog(dir, scope, PAGE_SIZE, commits.length);
     if (current !== generation) return;
     // Drop anything already shown, in case history moved between the two calls.
     const known = new Set(commits.map((commit) => commit.hash));
@@ -264,20 +199,6 @@ const renderHead = () => {
   }
 };
 
-const relativeDate = (timestamp: number): string => {
-  const seconds = timestamp - Date.now() / 1000;
-  const units: Array<[Intl.RelativeTimeFormatUnit, number]> = [
-    ['year', 31_536_000], ['month', 2_592_000], ['week', 604_800], ['day', 86_400], ['hour', 3_600], ['minute', 60],
-  ];
-  const format = new Intl.RelativeTimeFormat(locale, { numeric: 'auto', style: 'short' });
-  for (const [unit, size] of units) {
-    if (Math.abs(seconds) >= size) return format.format(Math.round(seconds / size), unit);
-  }
-  return format.format(Math.round(seconds), 'second');
-};
-
-const absoluteDate = (timestamp: number): string => new Date(timestamp * 1000).toLocaleString(locale, { dateStyle: 'medium', timeStyle: 'short' });
-
 const openCommit = (commit: Commit) => {
   void host.openCommit(commit.hash).catch((error: unknown) => {
     const message = error instanceof HostRequestError
@@ -297,17 +218,13 @@ const copyHash = (commit: Commit, button: HTMLButtonElement) => {
   }).catch(() => { void host.toast({ kind: 'error', message: t('copy.failed') }); });
 };
 
-const matches = (commit: Commit, needle: string): boolean =>
-  commit.subject.toLowerCase().includes(needle) || commit.author.toLowerCase().includes(needle);
-
-const renderRow = (commit: Commit, index: number, filtered: boolean, width: number): HTMLElement => {
-  const graph = layout.rows[index];
-  const isCurrent = commit.refs.some((ref) => ref.current);
-  const row = element('div', isCurrent ? 'row current' : 'row');
+const renderRow = (commit: Commit, graph: GraphRow | undefined, filtered: boolean, width: number): HTMLElement => {
+  const dot = dotKind(commit);
+  const row = element('div', dot === 'current' ? 'row current' : 'row');
   row.tabIndex = 0;
   row.setAttribute('role', 'button');
-  row.title = `${commit.hash}\n${commit.author} — ${absoluteDate(commit.timestamp)}\n${commit.subject}`;
-  if (graph) row.append(filtered ? drawDot(graph.lane) : drawRowGraph(graph, width, isCurrent ? 'current' : commit.parents.length > 1 ? 'merge' : 'commit'));
+  row.title = `${commit.hash}\n${commit.author} — ${absoluteDate(commit.timestamp, locale)}\n${commit.subject}`;
+  if (graph) row.append(filtered ? drawDot(graph.lane) : drawRowGraph(graph, width, dot));
   if (commit.refs.length > 0) {
     const refs = element('span', 'refs');
     for (const ref of commit.refs) refs.append(refBadge(ref));
@@ -321,7 +238,7 @@ const renderRow = (commit: Commit, index: number, filtered: boolean, width: numb
   row.append(
     element('span', 'subject', commit.subject),
     element('span', 'author', commit.author),
-    element('span', 'date', relativeDate(commit.timestamp)),
+    element('span', 'date', relativeDate(commit.timestamp, locale)),
     element('span', 'hash', commit.hash.slice(0, 7)),
     copy,
   );
@@ -332,32 +249,32 @@ const renderRow = (commit: Commit, index: number, filtered: boolean, width: numb
   return row;
 };
 
-const renderList = () => {
-  const needle = query.trim().toLowerCase();
+const renderList = ({ active, matches }: FilterResult) => {
   const width = graphWidth(layout.width);
-  const rows: HTMLElement[] = [];
-  commits.forEach((commit, index) => {
-    if (needle && !matches(commit, needle)) return;
-    rows.push(renderRow(commit, index, needle !== '', width));
-  });
-  if (needle && rows.length === 0 && commits.length > 0) rows.push(element('div', 'footer', t('list.noMatch')));
+  const rows: HTMLElement[] = matches.map(({ commit, index }) => renderRow(commit, layout.rows[index], active, width));
+  if (active && rows.length === 0 && commits.length > 0) rows.push(element('div', 'footer', t('list.noMatch')));
   list.replaceChildren(...rows);
 };
 
-const renderFooter = () => {
+const renderFooter = ({ active, matches }: FilterResult) => {
   footer.replaceChildren();
   if (commits.length === 0) return;
-  const needle = query.trim().toLowerCase();
-  const shown = needle ? commits.filter((commit) => matches(commit, needle)).length : commits.length;
-  const count = needle ? t('footer.filtered', { shown, count: commits.length })
+  const count = active ? t('footer.filtered', { shown: matches.length, count: commits.length })
     : t(hasMore ? 'footer.loaded' : 'footer.commits', { count: commits.length });
   footer.append(element('span', '', count));
   if (layout.width > MAX_LANES) footer.append(element('span', '', `· ${t('footer.hiddenLanes', { count: layout.width - MAX_LANES })}`));
   if (hasMore) {
     const more = element('div');
     footer.append(more);
-    mountButton(more, { label: t('footer.loadMore', { count: PAGE }), variant: 'secondary', size: 'xs', loading: loadingMore, onClick: () => { void loadMore(); } });
+    mountButton(more, { label: t('footer.loadMore', { count: PAGE_SIZE }), variant: 'secondary', size: 'xs', loading: loadingMore, onClick: () => { void loadMore(); } });
   }
+};
+
+/** The list and its footer show the same filtered set, computed once. */
+const renderHistory = () => {
+  const filtered = filterCommits(commits, query);
+  renderList(filtered);
+  renderFooter(filtered);
 };
 
 /** Toolbar controls are mounted once; only a locale change rewrites their texts. */
@@ -369,8 +286,7 @@ const renderLabels = () => {
 const render = () => {
   renderNotice();
   renderHead();
-  renderList();
-  renderFooter();
+  renderHistory();
 };
 
 // ----- Host wiring -----
@@ -392,7 +308,7 @@ host.onDirectory((next) => {
   if (directorySeen && next === directory) return;
   directorySeen = true;
   directory = next;
-  commits = []; hasMore = false; head = null; layout = { rows: [], width: 0 };
+  resetHistory();
   void load({ keepCount: false });
 });
 
@@ -413,7 +329,7 @@ const watch = async () => {
   if (document.visibilityState !== 'hidden' && directory && !problem && !loading && !loadingMore) {
     const current = generation;
     try {
-      const next = await readHead(directory);
+      const next = await service.readHead(directory);
       if (current === generation) {
         const change = headChange(head, next);
         if (change === 'history') void load({ keepCount: true });

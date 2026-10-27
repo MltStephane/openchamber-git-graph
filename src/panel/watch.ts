@@ -1,5 +1,4 @@
-/** State of the repository as `/head` reports it; `refs` fingerprints every ref and HEAD. */
-export type Head = { branch: string | null; sha: string | null; dirty: boolean; changes: number; refs: string };
+import type { Head } from '../service-contract.ts';
 
 /** What a new head asks the panel to redraw: the whole log, only the header line, or nothing. */
 export type HeadChange = 'history' | 'head' | 'none';

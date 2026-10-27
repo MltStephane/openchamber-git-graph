@@ -51,6 +51,10 @@ var parseLog = (stdout) => stdout.split(RECORD).map((record) => record.replace(/
   };
 });
 
+// src/service-contract.ts
+var PAGE_SIZE = 500;
+var LIMIT_MAX = 2000;
+
 // src/service.ts
 var port = Number(process.env.OPENCHAMBER_SERVICE_PORT);
 var token = process.env.OPENCHAMBER_SERVICE_TOKEN ?? "";
@@ -58,8 +62,6 @@ if (!port || !token) {
   console.error("OPENCHAMBER_SERVICE_PORT and OPENCHAMBER_SERVICE_TOKEN are required");
   process.exit(1);
 }
-var LIMIT_DEFAULT = 500;
-var LIMIT_MAX = 2000;
 var SKIP_MAX = 1e6;
 var STATUS = {
   unauthorized: 401,
@@ -75,32 +77,29 @@ var json = (res, { status, body }) => {
   res.writeHead(status, { "Content-Type": "application/json" });
   res.end(JSON.stringify(body));
 };
+var classifyGitFailure = (error, stderr) => {
+  if (error.code === "ENOENT") {
+    return { ok: false, failure: "no-git", message: "git is not installed on the OpenChamber host.", unknownRevision: false };
+  }
+  if (/not a git repository/i.test(stderr)) {
+    return { ok: false, failure: "not-a-repo", message: "This folder is not a git repository.", unknownRevision: false };
+  }
+  const message = String(stderr || error.message).trim().split(`
+`)[0] ?? "";
+  const unknownRevision = /unknown revision|bad revision|ambiguous argument|does not have any commits/i.test(stderr);
+  return { ok: false, failure: "git-failed", message: message || "git failed.", unknownRevision };
+};
 var git = (directory, args) => new Promise((resolve) => {
   execFile("git", ["-C", directory, "-c", "core.quotepath=off", "-c", "log.showSignature=false", ...args], {
     timeout: 20000,
     maxBuffer: 32 * 1024 * 1024,
     env: { ...process.env, GIT_OPTIONAL_LOCKS: "0", GIT_TERMINAL_PROMPT: "0", LC_ALL: "C" }
   }, (error, stdout, stderr) => {
-    if (!error) {
-      resolve({ ok: true, stdout });
-      return;
-    }
-    const message = String(stderr || error.message).trim().split(`
-`)[0] ?? "";
-    if ("code" in error && error.code === "ENOENT") {
-      resolve({ ok: false, failure: "no-git", message: "git is not installed on the OpenChamber host.", unknownRevision: false });
-      return;
-    }
-    if (/not a git repository/i.test(stderr)) {
-      resolve({ ok: false, failure: "not-a-repo", message: "This folder is not a git repository.", unknownRevision: false });
-      return;
-    }
-    const unknownRevision = /unknown revision|bad revision|ambiguous argument|does not have any commits/i.test(stderr);
-    resolve({ ok: false, failure: "git-failed", message: message || "git failed.", unknownRevision });
+    resolve(error ? classifyGitFailure(error, stderr) : { ok: true, stdout });
   });
 });
 var checkRepository = async (dir) => {
-  if (!dir || !path.isAbsolute(dir) || dir.includes("\x00"))
+  if (!path.isAbsolute(dir) || dir.includes("\x00"))
     return fail("bad-request", "`dir` must be an absolute path.");
   try {
     if (!(await stat(dir)).isDirectory())
@@ -116,7 +115,7 @@ var parseInteger = (value, fallback, max, min = 0) => {
   return Number.isInteger(parsed) && parsed >= min ? Math.min(parsed, max) : fallback;
 };
 var readLog = async (dir, params) => {
-  const limit = parseInteger(params.get("limit"), LIMIT_DEFAULT, LIMIT_MAX, 1);
+  const limit = parseInteger(params.get("limit"), PAGE_SIZE, LIMIT_MAX, 1);
   const skip = parseInteger(params.get("skip"), 0, SKIP_MAX);
   const scope = params.get("scope") === "current" ? "current" : "all";
   const args = [
@@ -180,7 +179,7 @@ var server = http.createServer((req, res) => {
     json(res, fail("not-found", `No route ${req.method} ${url.pathname}.`));
     return;
   }
-  const dir = url.searchParams.get("dir");
+  const dir = url.searchParams.get("dir") ?? "";
   checkRepository(dir).then((problem) => problem ?? route(dir, url.searchParams)).catch((error) => fail("git-failed", error instanceof Error ? error.message : String(error))).then((reply) => json(res, reply));
 });
 server.listen(port, "127.0.0.1");

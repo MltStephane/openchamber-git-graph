@@ -66,11 +66,13 @@ export const layoutGraph = (commits: readonly GraphCommit[]): GraphLayout => {
     const hasParent = commit.parents.length > 0;
     active[lane] = commit.parents[0] ?? null;
 
+    // Every other lane waiting for this commit converges into it.
+    const convergingLanes = waiting.slice(1);
     const extraLanes: number[] = [];
     const newExtraLanes = new Set<number>();
     // Converging lanes close before merge parents look for a free lane, so an
     // octopus can reuse them on the same row.
-    for (const converging of waiting.slice(1)) active[converging] = null;
+    for (const converging of convergingLanes) active[converging] = null;
     for (const parent of commit.parents.slice(1)) {
       const existing = active.indexOf(parent);
       if (existing >= 0 && !newExtraLanes.has(existing) && existing !== lane) {
@@ -88,7 +90,7 @@ export const layoutGraph = (commits: readonly GraphCommit[]): GraphLayout => {
     if (hasIncoming && hasParent) connectors.push({ fromLane: lane, toLane: lane, type: 'commit-lane' });
     else if (hasIncoming) connectors.push({ fromLane: lane, toLane: lane, type: 'top-stub' });
     else if (hasParent) connectors.push({ fromLane: lane, toLane: lane, type: 'bottom-stub' });
-    for (const converging of waiting.slice(1)) connectors.push({ fromLane: converging, toLane: lane, type: 'merge-in' });
+    for (const converging of convergingLanes) connectors.push({ fromLane: converging, toLane: lane, type: 'merge-in' });
     for (const extra of extraLanes) connectors.push({ fromLane: lane, toLane: extra, type: 'branch-out' });
     // A reused merge parent already had a lane above, so it keeps its straight segment.
     // A lane opened on this row (even one a converging line just freed) only starts below the dot.

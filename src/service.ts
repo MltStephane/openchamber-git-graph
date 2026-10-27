@@ -2,13 +2,14 @@
 // Runs under the app's Node runtime, listens on 127.0.0.1 and is reached only through the host proxy.
 // Read-only: git runs through execFile (no shell) with optional locks off, so it never blocks the
 // user's own git commands.
-import { execFile } from 'node:child_process';
+import { execFile, type ExecException } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { stat } from 'node:fs/promises';
 import http from 'node:http';
 import path from 'node:path';
 
-import { LOG_FORMAT, parseLog, type Commit } from './log-format.ts';
+import { LOG_FORMAT, parseLog } from './log-format.ts';
+import { LIMIT_MAX, PAGE_SIZE, type Failure, type FailureCode, type Head, type LogPage } from './service-contract.ts';
 
 const port = Number(process.env.OPENCHAMBER_SERVICE_PORT);
 const token = process.env.OPENCHAMBER_SERVICE_TOKEN ?? '';
@@ -17,27 +18,40 @@ if (!port || !token) {
   process.exit(1);
 }
 
-const LIMIT_DEFAULT = 500;
-const LIMIT_MAX = 2000;
 const SKIP_MAX = 1_000_000;
 
-type Failure = 'unauthorized' | 'not-found' | 'bad-request' | 'no-directory' | 'no-git' | 'not-a-repo' | 'git-failed';
-type Answer =
-  | { commits: Commit[]; hasMore: boolean }
-  | { branch: string | null; sha: string | null; dirty: boolean; changes: number; refs: string }
-  | { error: Failure; message: string }
-  | { ok: true };
-type GitResult = { ok: true; stdout: string } | { ok: false; failure: Failure; message: string; unknownRevision: boolean };
+type Answer = LogPage | Head | Failure | { ok: true };
+type GitFailure = { ok: false; failure: FailureCode; message: string; unknownRevision: boolean };
+type GitResult = { ok: true; stdout: string } | GitFailure;
 type Reply = { status: number; body: Answer };
 
-const STATUS: Record<Failure, number> = {
-  'unauthorized': 401, 'not-found': 404, 'bad-request': 400, 'no-directory': 422, 'not-a-repo': 422, 'no-git': 500, 'git-failed': 500,
+const STATUS: Record<FailureCode, number> = {
+  'unauthorized': 401,
+  'not-found': 404,
+  'bad-request': 400,
+  'no-directory': 422,
+  'not-a-repo': 422,
+  'no-git': 500,
+  'git-failed': 500,
 };
-const fail = (failure: Failure, message: string): Reply => ({ status: STATUS[failure], body: { error: failure, message } });
+const fail = (failure: FailureCode, message: string): Reply => ({ status: STATUS[failure], body: { error: failure, message } });
 
 const json = (res: http.ServerResponse, { status, body }: Reply): void => {
   res.writeHead(status, { 'Content-Type': 'application/json' });
   res.end(JSON.stringify(body));
+};
+
+/** Why git failed; `unknownRevision` tells a repository without commits apart from a real error. */
+const classifyGitFailure = (error: ExecException, stderr: string): GitFailure => {
+  if (error.code === 'ENOENT') {
+    return { ok: false, failure: 'no-git', message: 'git is not installed on the OpenChamber host.', unknownRevision: false };
+  }
+  if (/not a git repository/i.test(stderr)) {
+    return { ok: false, failure: 'not-a-repo', message: 'This folder is not a git repository.', unknownRevision: false };
+  }
+  const message = String(stderr || error.message).trim().split('\n')[0] ?? '';
+  const unknownRevision = /unknown revision|bad revision|ambiguous argument|does not have any commits/i.test(stderr);
+  return { ok: false, failure: 'git-failed', message: message || 'git failed.', unknownRevision };
 };
 
 const git = (directory: string, args: string[]): Promise<GitResult> => new Promise((resolve) => {
@@ -46,24 +60,13 @@ const git = (directory: string, args: string[]): Promise<GitResult> => new Promi
     maxBuffer: 32 * 1024 * 1024,
     env: { ...process.env, GIT_OPTIONAL_LOCKS: '0', GIT_TERMINAL_PROMPT: '0', LC_ALL: 'C' },
   }, (error, stdout, stderr) => {
-    if (!error) { resolve({ ok: true, stdout }); return; }
-    const message = String(stderr || error.message).trim().split('\n')[0] ?? '';
-    if ('code' in error && error.code === 'ENOENT') {
-      resolve({ ok: false, failure: 'no-git', message: 'git is not installed on the OpenChamber host.', unknownRevision: false });
-      return;
-    }
-    if (/not a git repository/i.test(stderr)) {
-      resolve({ ok: false, failure: 'not-a-repo', message: 'This folder is not a git repository.', unknownRevision: false });
-      return;
-    }
-    const unknownRevision = /unknown revision|bad revision|ambiguous argument|does not have any commits/i.test(stderr);
-    resolve({ ok: false, failure: 'git-failed', message: message || 'git failed.', unknownRevision });
+    resolve(error ? classifyGitFailure(error, stderr) : { ok: true, stdout });
   });
 });
 
 /** `dir` must be an absolute path to an existing folder inside a git work tree (or a bare repository). */
-const checkRepository = async (dir: string | null): Promise<Reply | null> => {
-  if (!dir || !path.isAbsolute(dir) || dir.includes('\0')) return fail('bad-request', '`dir` must be an absolute path.');
+const checkRepository = async (dir: string): Promise<Reply | null> => {
+  if (!path.isAbsolute(dir) || dir.includes('\0')) return fail('bad-request', '`dir` must be an absolute path.');
   try {
     if (!(await stat(dir)).isDirectory()) return fail('no-directory', `${dir} is not a folder.`);
   } catch {
@@ -79,7 +82,7 @@ const parseInteger = (value: string | null, fallback: number, max: number, min =
 };
 
 const readLog = async (dir: string, params: URLSearchParams): Promise<Reply> => {
-  const limit = parseInteger(params.get('limit'), LIMIT_DEFAULT, LIMIT_MAX, 1);
+  const limit = parseInteger(params.get('limit'), PAGE_SIZE, LIMIT_MAX, 1);
   const skip = parseInteger(params.get('skip'), 0, SKIP_MAX);
   const scope = params.get('scope') === 'current' ? 'current' : 'all';
   // --date-order comes after --topo-order and wins: commits stay in date order while
@@ -141,9 +144,9 @@ const server = http.createServer((req, res) => {
     json(res, fail('not-found', `No route ${req.method} ${url.pathname}.`));
     return;
   }
-  const dir = url.searchParams.get('dir');
+  const dir = url.searchParams.get('dir') ?? '';
   void checkRepository(dir)
-    .then((problem) => problem ?? route(dir as string, url.searchParams))
+    .then((problem) => problem ?? route(dir, url.searchParams))
     .catch((error: unknown) => fail('git-failed', error instanceof Error ? error.message : String(error)))
     .then((reply) => json(res, reply));
 });

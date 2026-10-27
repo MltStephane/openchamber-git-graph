@@ -48,7 +48,7 @@ When a text filter is active, the lines are hidden (they would lie about ancestr
 ```sh
 npm install
 npm run build      # panel/main.js (browser IIFE) + service/main.js (Node ESM), via openchamber-guest-bundle (Bun)
-npm test           # bun test: lanes (linear, branch+merge, octopus, multiple roots, continuity over 200 random DAGs) + log parsing + i18n + hot-reload decision
+npm test           # bun test: lanes (linear, branch+merge, octopus, multiple roots, continuity over 200 random DAGs) + log parsing + i18n + hot-reload decision + service client + error mapping + filter + dates + graph geometry
 npm run typecheck
 ```
 
@@ -62,15 +62,21 @@ curl -H 'Authorization: Bearer t' 'http://127.0.0.1:47999/log?dir=/path/to/repo&
 ## Tree
 
 ```
-package.json          manifest (openchamber.contributes: panel, page, service)
-panel/index.html      page loaded in the iframe
-panel/main.js         IIFE bundle (built)
-service/main.js       local service (built)
-src/graph.ts          lane algorithm
-src/log-format.ts     git log format and parsing (shared by service / tests)
-src/service.ts        local HTTP service
-src/panel/main.ts     panel logic
-src/panel/view.ts     SVG rendering, badges, styles
-src/panel/watch.ts    hot reload: what to read again when /head changes
-test/                 bun tests
+package.json                  manifest (openchamber.contributes: panel, page, service)
+panel/index.html              page loaded in the iframe
+panel/main.js                 IIFE bundle (built)
+service/main.js               local service (built)
+src/graph.ts                  lane algorithm
+src/log-format.ts             git log format and parsing (shared by service / tests)
+src/service-contract.ts       page size, limit, answer shapes and error codes shared by service and panel
+src/service.ts                local HTTP service
+src/panel/main.ts             panel orchestration: state, loading, rendering, polling
+src/panel/service-client.ts   /log and /head through host.serviceRequest, answers checked against the contract
+src/panel/problems.ts         service and host errors mapped to what the panel shows
+src/panel/filter.ts           text filter on subject and author
+src/panel/dates.ts            relative and absolute dates
+src/panel/graph-geometry.ts   row and lane sizes, lane colours, SVG paths, dot kind (no DOM)
+src/panel/view.ts             SVG rendering, badges, styles
+src/panel/watch.ts            hot reload: what to read again when /head changes
+test/                         bun tests
 ```
