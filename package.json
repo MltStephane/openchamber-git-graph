@@ -1,0 +1,46 @@
+{
+  "name": "openchamber-git-graph",
+  "version": "1.0.0",
+  "private": true,
+  "description": "OpenChamber extension: a git history graph of the open project.",
+  "type": "module",
+  "openchamber": {
+    "apiVersion": 1,
+    "engines": {
+      "openchamber": ">=1.24.0"
+    },
+    "contributes": {
+      "panel": {
+        "id": "git-graph",
+        "name": "Git Graph",
+        "icon": "git-branch",
+        "entry": "panel/index.html"
+      },
+      "page": true,
+      "service": {
+        "entry": "service/main.js",
+        "runtime": "host",
+        "permissions": {
+          "exec": [
+            "git"
+          ]
+        }
+      }
+    }
+  },
+  "scripts": {
+    "build": "npm run build:panel && npm run build:service",
+    "build:panel": "openchamber-guest-bundle src/panel/main.ts panel/main.js",
+    "build:service": "mkdir -p service && openchamber-guest-bundle --node src/service.ts service/main.js",
+    "test": "bun test",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@openchamber/sdk": "2.5.2"
+  },
+  "devDependencies": {
+    "@types/bun": "^1.4.4",
+    "@types/node": "^26.6.5",
+    "typescript": "^5.9.3"
+  }
+}
