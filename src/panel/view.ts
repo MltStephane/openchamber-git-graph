@@ -31,7 +31,6 @@ export const STYLE = `
   button { font: inherit; color: inherit; }
   .toolbar { flex: none; display: flex; flex-wrap: wrap; align-items: center; gap: 6px 8px; padding: 8px 8px 6px; }
   .toolbar .search { flex: 1 1 160px; min-width: 120px; }
-  .toolbar .grow { flex: 1; }
   .headinfo { display: flex; align-items: center; gap: 6px; color: var(--oc-muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .headinfo .branch { color: var(--oc-fg); font-weight: 600; }
   .headinfo .dirty { color: var(--oc-warning-text); }

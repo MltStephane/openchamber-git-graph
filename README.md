@@ -1,75 +1,76 @@
-# Git Graph (extension OpenChamber)
+# Git Graph (OpenChamber extension)
 
-Affiche le graphe de l'historique git du projet ouvert dans OpenChamber : lanes colorées, merges, badges de refs (HEAD, branches locales et distantes, tags), sujet, auteur, date relative.
+Shows the git history graph of the project open in OpenChamber: colored lanes, merges, ref badges (HEAD, local and remote branches, tags), subject, author, relative date.
 
-- **Panel** sur le rail (icône `git-branch`) et **vue plein écran** (menu « Extension pages » au-dessus de la liste des sessions).
-- Clic (ou Entrée) sur un commit : ouvre son diff (`host.openCommit`). Bouton « Copier » : copie le hash complet. L'infobulle d'une ligne montre le hash complet, l'auteur, la date absolue et le sujet.
-- Onglets « Toutes les branches » / « Branche courante », filtre texte sur sujet et auteur, pagination par 500 (« Charger 500 de plus »).
-- Rafraîchissement automatique au changement de projet et quand une session passe à `completed` ; bouton « Rafraîchir ».
-- Thème clair/sombre suivi via `applyHostReady` ; une couleur par lane tirée des tokens du thème.
+- **Panel** on the rail (`git-merge` icon) and **full-screen view** ("Extension pages" menu above the session list).
+- Click (or Enter) on a commit: opens its diff (`host.openCommit`). "Copy" button: copies the full hash. A row's tooltip shows the full hash, the author, the absolute date and the subject.
+- "All branches" / "Current branch" tabs, text filter on subject and author, pagination by 500 ("Load 500 more").
+- Hot reload: reload on project change, then `/head` is polled every 3 s while the panel is visible; the log is read again only when the refs, HEAD or the current branch change, otherwise only the header line is updated. Paused on error until "Retry".
+- Follows the light/dark theme via `applyHostReady`; one color per lane, taken from the theme tokens.
 
 ## Installation
 
-1. Dans OpenChamber (web ou desktop) : **Settings → Extensions**.
-2. Coller le chemin absolu du dossier : `/home/ubuntu/Projets/OpenchamberExtensions/openchamber-git-graph`, puis **Add**.
-3. Approuver la demande : l'extension déclare un **service local** qui exécute `git`. Sans cette approbation, le panel affiche « Service local non autorisé ».
-4. Cliquer sur l'icône Git Graph du rail.
+1. In OpenChamber (web or desktop): **Settings → Extensions**.
+2. Paste the absolute path of the folder: `/home/ubuntu/Projets/OpenchamberExtensions/openchamber-git-graph`, then **Add**.
+3. Approve the request: the extension declares a **local service** that runs `git`. Without this approval, the panel shows "Local service not allowed".
+4. Click the Git Graph icon on the rail.
 
-Les fichiers buildés (`panel/main.js`, `service/main.js`) sont livrés : OpenChamber ne compile rien. Après une modification des sources, relancer `npm run build` puis recharger l'extension.
+The built files (`panel/main.js`, `service/main.js`) are shipped: OpenChamber compiles nothing. After changing the sources, run `npm run build` again, then reload the extension.
 
-## Fonctionnement
+## How it works
 
-La page tourne dans un iframe sandboxé, sans réseau ni accès à git. Elle passe par `host.serviceRequest` vers un service Node local que OpenChamber démarre (`contributes.service`, voir `GUEST_SERVICES.md` dans `@openchamber/sdk`). Le service écoute sur `127.0.0.1`, exige le jeton `OPENCHAMBER_SERVICE_TOKEN`, et lance git par `execFile` (sans shell) avec `GIT_OPTIONAL_LOCKS=0` : lecture seule, aucune injection possible par les paramètres.
+The page runs in a sandboxed iframe, with no network and no access to git. It goes through `host.serviceRequest` to a local Node service that OpenChamber starts (`contributes.service`, see `GUEST_SERVICES.md` in `@openchamber/sdk`). The service listens on `127.0.0.1`, requires the `OPENCHAMBER_SERVICE_TOKEN` token, and runs git through `execFile` (no shell) with `GIT_OPTIONAL_LOCKS=0`: read-only, no injection possible through the parameters.
 
-| Route | Paramètres | Réponse |
+| Route | Parameters | Response |
 |---|---|---|
 | `GET /health` | | `{ ok: true }` |
-| `GET /log` | `dir` (absolu), `limit` (1–2000, défaut 500), `skip` (défaut 0), `scope` (`all` \| `current`) | `{ commits: [{ hash, parents, refs, author, timestamp, subject }], hasMore }` |
-| `GET /head` | `dir` | `{ branch, sha, dirty, changes }` |
+| `GET /log` | `dir` (absolute), `limit` (1–2000, default 500), `skip` (default 0), `scope` (`all` \| `current`) | `{ commits: [{ hash, parents, refs, author, timestamp, subject }], hasMore }` |
+| `GET /head` | `dir` | `{ branch, sha, dirty, changes, refs }` (`refs`: sha1 fingerprint of `git for-each-ref` and HEAD) |
 
-Erreurs : `{ error, message }` avec `400 bad-request` (chemin non absolu), `422 no-directory` / `422 not-a-repo`, `500 no-git` / `git-failed`. Un dépôt sans commit renvoie une liste vide.
+Errors: `{ error, message }` with `400 bad-request` (non-absolute path), `422 no-directory` / `422 not-a-repo`, `500 no-git` / `git-failed`. A repository without commits returns an empty list.
 
-`/log` lance `git log --topo-order --date-order --decorate=full --all` (ou `HEAD`). Les deux options d'ordre sont passées ; git applique la dernière (`--date-order`), qui garantit aussi qu'un enfant précède toujours ses parents, seule condition dont l'algorithme de lanes a besoin.
+`/log` runs `git log --topo-order --date-order --decorate=full --all` (or `HEAD`). Both ordering options are passed; git applies the last one (`--date-order`), which also guarantees that a child always comes before its parents, the only condition the lane algorithm needs.
 
-### Algorithme de lanes (`src/graph.ts`)
+### Lane algorithm (`src/graph.ts`)
 
-Déterministe, en une passe sur les commits du plus récent au plus ancien :
+Deterministic, in a single pass over the commits from newest to oldest:
 
-- un commit prend la lane la plus à gauche qui l'attend, sinon la lane libre la plus à gauche ;
-- son premier parent garde cette lane ;
-- chaque autre parent (merge, octopus) réutilise la lane qui l'attend déjà, sinon ouvre la lane libre la plus à gauche ;
-- les autres lanes qui attendaient ce commit convergent vers lui et se ferment ;
-- un commit racine ferme sa lane.
+- a commit takes the leftmost lane waiting for it, otherwise the leftmost free lane;
+- its first parent keeps that lane;
+- every other parent (merge, octopus) reuses the lane already waiting for it, otherwise opens the leftmost free lane;
+- the other lanes waiting for this commit converge to it and close;
+- a root commit closes its lane.
 
-Quand un filtre texte est actif, les lignes sont masquées (elles mentiraient sur l'ascendance) et seul le point coloré de la lane reste.
+When a text filter is active, the lines are hidden (they would lie about ancestry) and only the lane's colored dot remains.
 
-## Développement
+## Development
 
 ```sh
 npm install
-npm run build      # panel/main.js (IIFE navigateur) + service/main.js (ESM Node), via openchamber-guest-bundle (Bun)
-npm test           # bun test : lanes (linéaire, branche+merge, octopus, racines multiples, continuité sur 200 DAG aléatoires) + parsing du log
+npm run build      # panel/main.js (browser IIFE) + service/main.js (Node ESM), via openchamber-guest-bundle (Bun)
+npm test           # bun test: lanes (linear, branch+merge, octopus, multiple roots, continuity over 200 random DAGs) + log parsing + i18n + hot-reload decision
 npm run typecheck
 ```
 
-Tester le service à la main :
+Test the service by hand:
 
 ```sh
 OPENCHAMBER_SERVICE_PORT=47999 OPENCHAMBER_SERVICE_TOKEN=t node service/main.js &
-curl -H 'Authorization: Bearer t' 'http://127.0.0.1:47999/log?dir=/chemin/du/depot&limit=5'
+curl -H 'Authorization: Bearer t' 'http://127.0.0.1:47999/log?dir=/path/to/repo&limit=5'
 ```
 
-## Arborescence
+## Tree
 
 ```
-package.json          manifest (openchamber.contributes : panel, page, service)
-panel/index.html      page chargée dans l'iframe
-panel/main.js         bundle IIFE (buildé)
-service/main.js       service local (buildé)
-src/graph.ts          algorithme de lanes
-src/log-format.ts     format git log et parsing (partagé service / tests)
-src/service.ts        service HTTP local
-src/panel/main.ts     logique du panel
-src/panel/view.ts     rendu SVG, badges, styles
-test/                 tests bun
+package.json          manifest (openchamber.contributes: panel, page, service)
+panel/index.html      page loaded in the iframe
+panel/main.js         IIFE bundle (built)
+service/main.js       local service (built)
+src/graph.ts          lane algorithm
+src/log-format.ts     git log format and parsing (shared by service / tests)
+src/service.ts        local HTTP service
+src/panel/main.ts     panel logic
+src/panel/view.ts     SVG rendering, badges, styles
+src/panel/watch.ts    hot reload: what to read again when /head changes
+test/                 bun tests
 ```

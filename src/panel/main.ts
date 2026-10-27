@@ -1,17 +1,17 @@
-import { connectHost, HostRequestError, type SessionLifecyclePhase } from '@openchamber/sdk';
+import { connectHost, HostRequestError } from '@openchamber/sdk';
 import { applyHostReady, mountBanner, mountButton, mountEmpty, mountSearchField, mountSpinner, mountTabs } from '@openchamber/sdk/ui';
 
 import { layoutGraph, type GraphLayout } from '../graph.ts';
 import type { Commit } from '../log-format.ts';
 import { resolveLocale, setLocale, t, type MessageKey, type MessageParams } from './i18n.ts';
+import { headChange, type Head } from './watch.ts';
 import { drawDot, drawRowGraph, element, graphWidth, MAX_LANES, refBadge, STYLE } from './view.ts';
 
 const PAGE = 500;
-/** The service answers at most this many commits per call; a refresh reloads up to it. */
+/** The service answers at most this many commits per call; a reload reads up to it. */
 const RELOAD_MAX = 2000;
 
 type Scope = 'all' | 'current';
-type Head = { branch: string | null; sha: string | null; dirty: boolean; changes: number };
 type LogPage = { commits: Commit[]; hasMore: boolean };
 /** Texts are kept as keys so a locale change repaints them; `detail` is the raw, untranslated cause. */
 type Problem =
@@ -54,13 +54,11 @@ const readLog = async (dir: string, scope: Scope, limit: number, skip: number): 
   return { commits: body.commits as Commit[], hasMore: body.hasMore === true };
 };
 
-const readHead = async (dir: string): Promise<Head | null> => {
-  try {
-    const body = await ask('/head', { dir });
-    return isObject(body) ? body as Head : null;
-  } catch {
-    return null; // The header line is a bonus; the log reports the real problem.
-  }
+const readHead = async (dir: string): Promise<Head> => {
+  const body = await ask('/head', { dir });
+  if (!isObject(body)) throw new ServiceError('bad-answer', 'Unexpected /head payload');
+  // A service started before `refs` existed keeps running until the host restarts it: watch HEAD and branch only.
+  return { ...body, refs: typeof body.refs === 'string' ? body.refs : '' } as Head;
 };
 
 /** Service codes whose raw message adds nothing to the translated one. */
@@ -122,8 +120,6 @@ root.append(toolbar, notice, list, footer);
 const tabsRoot = toolbar.appendChild(element('div'));
 const searchRoot = toolbar.appendChild(element('div', 'search'));
 const headInfo = toolbar.appendChild(element('div', 'headinfo'));
-toolbar.append(element('span', 'grow'));
-const refreshRoot = toolbar.appendChild(element('div'));
 
 const tabs = mountTabs(tabsRoot, {
   items: [],
@@ -146,10 +142,6 @@ const search = mountSearchField(searchRoot, {
   },
 });
 
-const refresh = mountButton(refreshRoot, {
-  label: '', variant: 'ghost', size: 'xs', onClick: () => { void load({ keepCount: true }); },
-});
-
 // ----- Loading -----
 
 /** Reload the first page; `keepCount` keeps as many commits as are already shown (up to RELOAD_MAX). */
@@ -170,7 +162,8 @@ const load = async ({ keepCount }: { keepCount: boolean }) => {
     starting = (await host.serviceStatus().catch(() => null))?.status !== 'ready';
     if (current !== generation) return;
     if (starting) render();
-    const [page, nextHead] = await Promise.all([readLog(dir, scope, limit, 0), readHead(dir)]);
+    // The header line is a bonus; the log reports the real problem.
+    const [page, nextHead] = await Promise.all([readLog(dir, scope, limit, 0), readHead(dir).catch(() => null)]);
     if (current !== generation) return;
     commits = page.commits;
     hasMore = page.hasMore;
@@ -371,11 +364,9 @@ const renderFooter = () => {
 const renderLabels = () => {
   tabs.update({ items: [{ id: 'all', label: t('tabs.all') }, { id: 'current', label: t('tabs.current') }] });
   search.update({ placeholder: t('search.placeholder') });
-  refresh.update({ label: t('toolbar.refresh') });
 };
 
 const render = () => {
-  refresh.update({ disabled: !directory, loading: loading && commits.length > 0 });
   renderNotice();
   renderHead();
   renderList();
@@ -405,14 +396,44 @@ host.onDirectory((next) => {
   void load({ keepCount: false });
 });
 
-// An agent turn that just finished may have committed: read the history again.
-// The first event of a session only replays its current phase, so it never counts as a transition.
-const lastPhases = new Map<string, SessionLifecyclePhase>();
-host.onSessionLifecycle((event) => {
-  const previous = lastPhases.get(event.sessionId);
-  lastPhases.set(event.sessionId, event.phase);
-  if (previous !== undefined && previous !== 'completed' && event.phase === 'completed') void load({ keepCount: true });
+// ----- Watching -----
+
+/** The service cannot push: while visible, the panel asks for the head and reloads only what moved. */
+const WATCH_INTERVAL = 3000;
+/** Pending tick; undefined while a tick runs, so a tick never overlaps another. */
+let watchTimer: ReturnType<typeof setTimeout> | undefined;
+
+const scheduleWatch = () => {
+  watchTimer = setTimeout(() => { void watch(); }, WATCH_INTERVAL);
+};
+
+const watch = async () => {
+  watchTimer = undefined;
+  // A shown problem stops the polling: only "Retry" asks the service again (GUEST_SERVICES.md).
+  if (document.visibilityState !== 'hidden' && directory && !problem && !loading && !loadingMore) {
+    const current = generation;
+    try {
+      const next = await readHead(directory);
+      if (current === generation) {
+        const change = headChange(head, next);
+        if (change === 'history') void load({ keepCount: true });
+        if (change === 'head') { head = next; renderHead(); }
+      }
+    } catch (error) {
+      // Shown as is rather than reloaded, so a failing /head cannot loop: the problem pauses the polling.
+      if (current === generation) { problem = toProblem(error); render(); }
+    }
+  }
+  scheduleWatch();
+};
+
+// Back from the background: read the state now instead of waiting for the next tick.
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'hidden' || watchTimer === undefined) return;
+  clearTimeout(watchTimer);
+  void watch();
 });
 
 renderLabels();
 render();
+scheduleWatch();

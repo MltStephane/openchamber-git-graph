@@ -1,5 +1,6 @@
 // src/service.ts
 import { execFile } from "node:child_process";
+import { createHash } from "node:crypto";
 import { stat } from "node:fs/promises";
 import http from "node:http";
 import path from "node:path";
@@ -139,20 +140,24 @@ var readLog = async (dir, params) => {
   return { status: 200, body: { commits: commits.slice(0, limit), hasMore } };
 };
 var readHead = async (dir) => {
-  const [branch, sha, status] = await Promise.all([
+  const [branch, sha, status, refs] = await Promise.all([
     git(dir, ["symbolic-ref", "--short", "-q", "HEAD"]),
     git(dir, ["rev-parse", "--verify", "-q", "HEAD"]),
-    git(dir, ["status", "--porcelain=v1", "--untracked-files=normal"])
+    git(dir, ["status", "--porcelain=v1", "--untracked-files=normal"]),
+    git(dir, ["for-each-ref", "--format=%(objectname) %(refname)"])
   ]);
   const changes = status.ok ? status.stdout.split(`
 `).filter(Boolean).length : 0;
+  const headSha = sha.ok ? sha.stdout.trim() || null : null;
+  const fingerprint = createHash("sha1").update(refs.ok ? refs.stdout : "").update(headSha ?? "").digest("hex");
   return {
     status: 200,
     body: {
       branch: branch.ok ? branch.stdout.trim() || null : null,
-      sha: sha.ok ? sha.stdout.trim() || null : null,
+      sha: headSha,
       dirty: changes > 0,
-      changes
+      changes,
+      refs: fingerprint
     }
   };
 };

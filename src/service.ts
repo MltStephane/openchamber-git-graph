@@ -3,6 +3,7 @@
 // Read-only: git runs through execFile (no shell) with optional locks off, so it never blocks the
 // user's own git commands.
 import { execFile } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { stat } from 'node:fs/promises';
 import http from 'node:http';
 import path from 'node:path';
@@ -23,7 +24,7 @@ const SKIP_MAX = 1_000_000;
 type Failure = 'unauthorized' | 'not-found' | 'bad-request' | 'no-directory' | 'no-git' | 'not-a-repo' | 'git-failed';
 type Answer =
   | { commits: Commit[]; hasMore: boolean }
-  | { branch: string | null; sha: string | null; dirty: boolean; changes: number }
+  | { branch: string | null; sha: string | null; dirty: boolean; changes: number; refs: string }
   | { error: Failure; message: string }
   | { ok: true };
 type GitResult = { ok: true; stdout: string } | { ok: false; failure: Failure; message: string; unknownRevision: boolean };
@@ -98,19 +99,24 @@ const readLog = async (dir: string, params: URLSearchParams): Promise<Reply> => 
 };
 
 const readHead = async (dir: string): Promise<Reply> => {
-  const [branch, sha, status] = await Promise.all([
+  const [branch, sha, status, refs] = await Promise.all([
     git(dir, ['symbolic-ref', '--short', '-q', 'HEAD']),
     git(dir, ['rev-parse', '--verify', '-q', 'HEAD']),
     git(dir, ['status', '--porcelain=v1', '--untracked-files=normal']),
+    git(dir, ['for-each-ref', '--format=%(objectname) %(refname)']),
   ]);
   const changes = status.ok ? status.stdout.split('\n').filter(Boolean).length : 0;
+  const headSha = sha.ok ? sha.stdout.trim() || null : null;
+  // Fingerprint of the visible history: the panel reloads the log only when it changes.
+  const fingerprint = createHash('sha1').update(refs.ok ? refs.stdout : '').update(headSha ?? '').digest('hex');
   return {
     status: 200,
     body: {
       branch: branch.ok ? branch.stdout.trim() || null : null,
-      sha: sha.ok ? sha.stdout.trim() || null : null,
+      sha: headSha,
       dirty: changes > 0,
       changes,
+      refs: fingerprint,
     },
   };
 };
