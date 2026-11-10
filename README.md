@@ -58,7 +58,7 @@ You run several coding agents in parallel. Commits land while you are not typing
    ```
 2. In OpenChamber (web or desktop), open **Settings → Extensions**, paste the absolute path of the folder, then click **Add**.
 3. **Approve the local service** the extension declares: it runs `git`. Without this approval, the panel shows *Local service not allowed*.
-4. Click the <kbd>git-merge</kbd> icon on the rail for the **panel**, or open the **full-screen page** from the *Extension pages* menu above the session list.
+4. Click the <kbd>Git Graph</kbd> icon on the rail for the **panel**, or open the **full-screen page** from the *Extension pages* menu above the session list.
 
 > [!TIP]
 > The built files (`panel/main.js`, `service/main.js`) are committed: OpenChamber compiles nothing. After changing the sources, run `npm run build`, then reload the extension.

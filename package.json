@@ -13,7 +13,7 @@
       "panel": {
         "id": "git-graph",
         "name": "Git Graph",
-        "icon": "git-merge",
+        "icon": "icon.svg",
         "entry": "panel/index.html"
       },
       "page": true,

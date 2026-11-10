@@ -4,7 +4,7 @@
 
 An **OpenChamber** extension that shows the git history graph of the open project: colored lanes, merges, ref badges (HEAD, local and remote branches, tags), subject, author, relative date. Clicking a commit opens its diff in OpenChamber.
 
-- Surfaces: a **panel** on the rail (`git-merge` icon) and a **full-screen page** ("Extension pages" menu).
+- Surfaces: a **panel** on the rail (`icon.svg` icon) and a **full-screen page** ("Extension pages" menu).
 - Personal extension, installed from a local path in OpenChamber (Settings → Extensions). Not published, no third-party users.
 - Repository: `git@github.com:MltStephane/openchamber-git-graph.git`, branch `master`.
 
