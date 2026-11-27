@@ -11,7 +11,7 @@ import { resolveLocale, setLocale, t } from './i18n.ts';
 import { toProblem, type Problem } from './problems.ts';
 import { createServiceClient } from './service-client.ts';
 import { headChange } from './watch.ts';
-import { drawDot, drawRowGraph, element, refBadge, STYLE } from './view.ts';
+import { drawDot, drawRowGraph, element, refBadge, renderDiff, STYLE } from './view.ts';
 
 const host = connectHost();
 const root = document.querySelector<HTMLElement>('#root');
@@ -277,7 +277,7 @@ const openCommit = async (commit: Commit) => {
     try {
       const diff = await service.readDiff(dir, commit.hash);
       if (request !== diffRequest) return;
-      contents.replaceChildren(element('pre', '', diff.text || t('commit.emptyDiff')));
+      contents.replaceChildren(diff.text ? renderDiff(diff.text) : element('p', '', t('commit.emptyDiff')));
       if (diff.truncated) contents.append(element('p', '', t('commit.truncatedDiff')));
     } catch {
       if (request === diffRequest) contents.textContent = t('commit.openFailed');
