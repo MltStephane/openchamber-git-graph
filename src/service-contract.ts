@@ -14,6 +14,9 @@ export type LogPage = { commits: Commit[]; hasMore: boolean };
 /** State of the repository as `/head` reports it; `refs` fingerprints every ref and HEAD. */
 export type Head = { branch: string | null; sha: string | null; dirty: boolean; changes: number; refs: string };
 
+export type Repository = { directory: string; name: string };
+export type CommitDiff = { text: string; truncated: boolean };
+
 export type FailureCode = 'unauthorized' | 'not-found' | 'bad-request' | 'no-directory' | 'no-git' | 'not-a-repo' | 'git-failed';
 
 /** Body of every answer that is not a 200. */

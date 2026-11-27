@@ -1,6 +1,6 @@
 import type { HostClient } from '@openchamber/sdk';
 
-import type { Head, LogPage, Scope } from '../service-contract.ts';
+import type { CommitDiff, Head, LogPage, Repository, Scope } from '../service-contract.ts';
 
 /** A failure the service itself reported, with its own code. */
 export class ServiceError extends Error {
@@ -46,5 +46,22 @@ export const createServiceClient = (host: Pick<HostClient, 'serviceRequest'>) =>
     return body;
   };
 
-  return { readLog, readHead };
+  const readRepositories = async (dir: string): Promise<Repository[]> => {
+    const body = await ask('/repositories', { dir });
+    if (!isObject(body) || !Array.isArray(body.repositories)
+      || !body.repositories.every((repo) => isObject(repo) && typeof repo.directory === 'string' && typeof repo.name === 'string')) {
+      throw new ServiceError('bad-answer', 'Unexpected /repositories payload');
+    }
+    return body.repositories;
+  };
+
+  const readDiff = async (dir: string, sha: string): Promise<CommitDiff> => {
+    const body = await ask('/diff', { dir, sha });
+    if (!isObject(body) || typeof body.text !== 'string' || typeof body.truncated !== 'boolean') {
+      throw new ServiceError('bad-answer', 'Unexpected /diff payload');
+    }
+    return { text: body.text, truncated: body.truncated };
+  };
+
+  return { readLog, readHead, readRepositories, readDiff };
 };

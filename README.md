@@ -65,7 +65,8 @@ You run several coding agents in parallel. Commits land while you are not typing
 
 ## Using it
 
-- **Open a diff**: click a commit, or focus it and press <kbd>Enter</kbd>.
+- **Switch repositories**: open a folder containing Git repositories, then choose one from the selector. Discovery includes the current repository and direct child working trees, including linked worktrees.
+- **Open a diff**: click a commit, or focus it and press <kbd>Enter</kbd>. For a child repository the diff opens in Git Graph; for the current project it still opens in OpenChamber.
 - **Copy a hash**: the *Copy* button copies the full hash, ready for `git cherry-pick` or a PR.
 - **Inspect a commit**: hover a row for the full hash, author, absolute date and subject.
 - **Narrow the history**: switch between *All branches* and *Current branch*, or type in the filter. While a filter is active, lane lines are hidden (they would lie about ancestry) and only each lane's colored dot remains.
@@ -93,8 +94,10 @@ The page runs in a sandboxed iframe with no network and no access to git. It goe
 | Route | Parameters | Response |
 |---|---|---|
 | `GET /health` | | `{ ok: true }` |
+| `GET /repositories` | `dir` (absolute folder) | `{ repositories: [{ directory, name }] }` |
 | `GET /log` | `dir` (absolute), `limit` (1–2000, default 500), `skip` (default 0), `scope` (`all` \| `current`) | `{ commits: [{ hash, parents, refs, author, timestamp, subject }], hasMore }` |
 | `GET /head` | `dir` | `{ branch, sha, dirty, changes, refs }` (`refs`: sha1 fingerprint of `git for-each-ref` and HEAD) |
+| `GET /diff` | `dir`, `sha` (full commit hash) | `{ text, truncated }` (merge diffs use the first parent) |
 
 Errors: `{ error, message }` with `400 bad-request` (non-absolute path), `422 no-directory` / `422 not-a-repo`, `500 no-git` / `git-failed`. A repository without commits returns an empty list.
 

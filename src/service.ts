@@ -4,12 +4,12 @@
 // user's own git commands.
 import { execFile, type ExecException } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { stat } from 'node:fs/promises';
+import { readdir, stat } from 'node:fs/promises';
 import http from 'node:http';
 import path from 'node:path';
 
 import { LOG_FORMAT, parseLog } from './log-format.ts';
-import { LIMIT_MAX, PAGE_SIZE, type Failure, type FailureCode, type Head, type LogPage } from './service-contract.ts';
+import { LIMIT_MAX, PAGE_SIZE, type CommitDiff, type Failure, type FailureCode, type Head, type LogPage, type Repository } from './service-contract.ts';
 
 const port = Number(process.env.OPENCHAMBER_SERVICE_PORT);
 const token = process.env.OPENCHAMBER_SERVICE_TOKEN ?? '';
@@ -20,9 +20,9 @@ if (!port || !token) {
 
 const SKIP_MAX = 1_000_000;
 
-type Answer = LogPage | Head | Failure | { ok: true };
+type Answer = LogPage | Head | CommitDiff | Failure | { ok: true } | { repositories: Repository[] };
 type GitFailure = { ok: false; failure: FailureCode; message: string; unknownRevision: boolean };
-type GitResult = { ok: true; stdout: string } | GitFailure;
+type GitResult = { ok: true; stdout: string; truncated?: boolean } | GitFailure;
 type Reply = { status: number; body: Answer };
 
 const STATUS: Record<FailureCode, number> = {
@@ -54,26 +54,54 @@ const classifyGitFailure = (error: ExecException, stderr: string): GitFailure =>
   return { ok: false, failure: 'git-failed', message: message || 'git failed.', unknownRevision };
 };
 
-const git = (directory: string, args: string[]): Promise<GitResult> => new Promise((resolve) => {
+const git = (directory: string, args: string[], previewBytes?: number): Promise<GitResult> => new Promise((resolve) => {
   execFile('git', ['-C', directory, '-c', 'core.quotepath=off', '-c', 'log.showSignature=false', ...args], {
     timeout: 20_000,
-    maxBuffer: 32 * 1024 * 1024,
+    maxBuffer: previewBytes ?? 32 * 1024 * 1024,
     env: { ...process.env, GIT_OPTIONAL_LOCKS: '0', GIT_TERMINAL_PROMPT: '0', LC_ALL: 'C' },
   }, (error, stdout, stderr) => {
+    if (previewBytes && error?.code === 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER' && stdout) {
+      resolve({ ok: true, stdout, truncated: true });
+      return;
+    }
     resolve(error ? classifyGitFailure(error, stderr) : { ok: true, stdout });
   });
 });
 
-/** `dir` must be an absolute path to an existing folder inside a git work tree (or a bare repository). */
-const checkRepository = async (dir: string): Promise<Reply | null> => {
+const checkDirectory = async (dir: string): Promise<Reply | null> => {
   if (!path.isAbsolute(dir) || dir.includes('\0')) return fail('bad-request', '`dir` must be an absolute path.');
   try {
     if (!(await stat(dir)).isDirectory()) return fail('no-directory', `${dir} is not a folder.`);
   } catch {
     return fail('no-directory', `${dir} does not exist.`);
   }
+  return null;
+};
+
+/** `dir` must be an absolute path to an existing folder inside a git work tree (or a bare repository). */
+const checkRepository = async (dir: string): Promise<Reply | null> => {
+  const problem = await checkDirectory(dir);
+  if (problem) return problem;
   const probe = await git(dir, ['rev-parse', '--git-dir']);
   return probe.ok ? null : fail(probe.failure, probe.message);
+};
+
+const discoverRepositories = async (dir: string): Promise<Reply> => {
+  const problem = await checkDirectory(dir);
+  if (problem) return problem;
+  const repositories: Repository[] = [];
+  const current = await checkRepository(dir);
+  if (!current) repositories.push({ directory: dir, name: path.basename(dir) || dir });
+  else if ('error' in current.body && current.body.error !== 'not-a-repo') return current;
+  const entries = await readdir(dir, { withFileTypes: true });
+  for (const entry of entries.sort((a, b) => a.name.localeCompare(b.name))) {
+    if (!entry.isDirectory() || entry.name === '.git') continue;
+    const directory = path.join(dir, entry.name);
+    const marker = await stat(path.join(directory, '.git')).catch(() => null);
+    if ((!marker?.isDirectory() && !marker?.isFile()) || await checkRepository(directory)) continue;
+    repositories.push({ directory, name: entry.name });
+  }
+  return { status: 200, body: { repositories } };
 };
 
 const parseInteger = (value: string | null, fallback: number, max: number, min = 0): number => {
@@ -124,9 +152,24 @@ const readHead = async (dir: string): Promise<Reply> => {
   };
 };
 
+const readDiff = async (dir: string, params: URLSearchParams): Promise<Reply> => {
+  const sha = params.get('sha') ?? '';
+  if (!/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i.test(sha)) {
+    return fail('bad-request', '`sha` must be a full commit hash.');
+  }
+  const diff = await git(dir, [
+    'show', '--format=', '--no-color', '--no-ext-diff', '--no-textconv',
+    '--diff-merges=first-parent', '--stat', '--patch', `${sha}^{commit}`, '--',
+  ], 200_000);
+  if (!diff.ok) return fail(diff.failure, diff.message);
+  return { status: 200, body: { text: diff.stdout, truncated: diff.truncated ?? false } };
+};
+
 const ROUTES: Record<string, (dir: string, params: URLSearchParams) => Promise<Reply>> = {
+  '/repositories': discoverRepositories,
   '/log': readLog,
   '/head': readHead,
+  '/diff': readDiff,
 };
 
 const server = http.createServer((req, res) => {
@@ -145,7 +188,8 @@ const server = http.createServer((req, res) => {
     return;
   }
   const dir = url.searchParams.get('dir') ?? '';
-  void checkRepository(dir)
+  // Discovery also accepts a parent folder that isn't itself a repository.
+  void (url.pathname === '/repositories' ? Promise.resolve(null) : checkRepository(dir))
     .then((problem) => problem ?? route(dir, url.searchParams))
     .catch((error: unknown) => fail('git-failed', error instanceof Error ? error.message : String(error)))
     .then((reply) => json(res, reply));

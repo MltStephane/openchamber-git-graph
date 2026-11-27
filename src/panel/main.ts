@@ -3,7 +3,7 @@ import { applyHostReady, mountBanner, mountButton, mountEmpty, mountSearchField,
 
 import { layoutGraph, type GraphLayout, type GraphRow } from '../graph.ts';
 import type { Commit } from '../log-format.ts';
-import { LIMIT_MAX, PAGE_SIZE, type Head, type Scope } from '../service-contract.ts';
+import { LIMIT_MAX, PAGE_SIZE, type Head, type Repository, type Scope } from '../service-contract.ts';
 import { absoluteDate, relativeDate } from './dates.ts';
 import { filterCommits, type FilterResult } from './filter.ts';
 import { dotKind, graphWidth, MAX_LANES } from './graph-geometry.ts';
@@ -11,7 +11,7 @@ import { resolveLocale, setLocale, t } from './i18n.ts';
 import { toProblem, type Problem } from './problems.ts';
 import { createServiceClient } from './service-client.ts';
 import { headChange } from './watch.ts';
-import { drawDot, drawRowGraph, element, refBadge, STYLE } from './view.ts';
+import { drawDot, drawRowGraph, element, refBadge, renderDiff, STYLE } from './view.ts';
 
 const host = connectHost();
 const root = document.querySelector<HTMLElement>('#root');
@@ -26,7 +26,9 @@ const service = createServiceClient(host);
 
 // ----- State -----
 
+let projectDirectory: string | null = null;
 let directory: string | null = null;
+let repositories: Repository[] = [];
 let locale = resolveLocale(undefined);
 let scope: Scope = 'all';
 let query = '';
@@ -39,6 +41,7 @@ let loading = false;
 let loadingMore = false;
 let starting = false;
 let generation = 0;
+let diffRequest = 0;
 
 /** Forget what was read: another project, a reload or a failed read all start from nothing. */
 const resetHistory = () => {
@@ -49,10 +52,14 @@ const resetHistory = () => {
 
 const toolbar = element('div', 'toolbar');
 const notice = element('div', 'notice');
+const diffView = element('section', 'commit-diff');
+diffView.hidden = true;
 const list = element('div', 'list');
 const footer = element('div', 'footer');
-root.append(toolbar, notice, list, footer);
+root.append(toolbar, notice, diffView, list, footer);
 
+const repositorySelect = toolbar.appendChild(element('select', 'repositories'));
+repositorySelect.hidden = true;
 const tabsRoot = toolbar.appendChild(element('div'));
 const searchRoot = toolbar.appendChild(element('div', 'search'));
 const headInfo = toolbar.appendChild(element('div', 'headinfo'));
@@ -82,6 +89,7 @@ const search = mountSearchField(searchRoot, {
 /** Reload the first page; `keepCount` keeps as many commits as are already shown (up to LIMIT_MAX). */
 const load = async ({ keepCount }: { keepCount: boolean }) => {
   const current = ++generation;
+  loadingMore = false;
   if (!directory) {
     resetHistory(); problem = { kind: 'no-project' }; loading = false;
     render();
@@ -94,8 +102,9 @@ const load = async ({ keepCount }: { keepCount: boolean }) => {
   render();
   try {
     // serviceRequest starts a stopped service itself; this only tells the user why the first load waits.
-    starting = (await host.serviceStatus().catch(() => null))?.status !== 'ready';
+    const serviceStatus = await host.serviceStatus().catch(() => null);
     if (current !== generation) return;
+    starting = serviceStatus?.status !== 'ready';
     if (starting) render();
     // The header line is a bonus; the log reports the real problem.
     const [page, nextHead] = await Promise.all([service.readLog(dir, scope, limit, 0), service.readHead(dir).catch(() => null)]);
@@ -113,6 +122,57 @@ const load = async ({ keepCount }: { keepCount: boolean }) => {
   layout = layoutGraph(commits);
   render();
 };
+
+const closeDiff = () => {
+  diffRequest += 1;
+  diffView.hidden = true;
+  diffView.replaceChildren();
+};
+
+const selectRepository = (next: string | null) => {
+  directory = next;
+  closeDiff();
+  resetHistory();
+  void load({ keepCount: false });
+};
+
+const discover = async () => {
+  const current = ++generation;
+  const project = projectDirectory;
+  repositories = [];
+  directory = null;
+  closeDiff();
+  resetHistory();
+  loadingMore = false;
+  problem = null;
+  starting = false;
+  loading = project !== null;
+  if (!project) problem = { kind: 'no-project' };
+  render();
+  if (!project) return;
+  try {
+    const found = await service.readRepositories(project);
+    if (current !== generation) return;
+    repositories = found;
+    const selected = found[0];
+    if (selected) {
+      selectRepository(selected.directory);
+      return;
+    }
+    problem = { kind: 'not-a-repo', message: 'repositories.empty' };
+  } catch (error) {
+    if (current !== generation) return;
+    problem = toProblem(error);
+  }
+  loading = false;
+  render();
+};
+
+repositorySelect.addEventListener('change', () => {
+  if (repositories.some((repo) => repo.directory === repositorySelect.value)) {
+    selectRepository(repositorySelect.value);
+  }
+});
 
 const loadMore = async () => {
   if (!directory || loadingMore || !hasMore) return;
@@ -153,7 +213,7 @@ const clearNotice = () => {
 const renderNotice = () => {
   clearNotice();
   if (loading && commits.length === 0) {
-    mountedNotice.push(mountSpinner(notice, { label: t(starting ? 'notice.starting' : 'notice.reading') }));
+    mountedNotice.push(mountSpinner(notice, { label: t(!directory ? 'repositories.scanning' : starting ? 'notice.starting' : 'notice.reading') }));
     return;
   }
   if (!problem) {
@@ -162,13 +222,16 @@ const renderNotice = () => {
     }
     return;
   }
-  const retry = { label: t('common.retry'), onClick: () => { void load({ keepCount: false }); } };
+  const retry = { label: t('common.retry'), onClick: () => {
+    if (directory) void load({ keepCount: false });
+    else void discover();
+  } };
   switch (problem.kind) {
     case 'no-project':
       mountedNotice.push(mountEmpty(notice, { title: t('empty.noProject.title'), body: t('empty.noProject.body') }));
       break;
     case 'not-a-repo':
-      mountedNotice.push(mountEmpty(notice, { title: t('error.notARepo.title'), body: `${directory ?? ''}\n${t(problem.message)}`, action: retry }));
+      mountedNotice.push(mountEmpty(notice, { title: t('error.notARepo.title'), body: `${directory ?? projectDirectory ?? ''}\n${t(problem.message)}`, action: retry }));
       break;
     case 'no-service':
       mountedNotice.push(mountBanner(notice, {
@@ -199,15 +262,40 @@ const renderHead = () => {
   }
 };
 
-const openCommit = (commit: Commit) => {
-  void host.openCommit(commit.hash).catch((error: unknown) => {
+const openCommit = async (commit: Commit) => {
+  const dir = directory;
+  if (!dir) return;
+  if (dir !== projectDirectory) {
+    const request = ++diffRequest;
+    diffView.hidden = false;
+    const header = element('div', 'diff-header');
+    header.append(element('strong', '', `${commit.hash.slice(0, 7)} ${commit.subject}`));
+    const close = header.appendChild(element('div'));
+    mountButton(close, { label: t('commit.closeDiff'), variant: 'secondary', size: 'xs', onClick: closeDiff });
+    const contents = element('div', 'diff-contents', t('commit.loadingDiff'));
+    diffView.replaceChildren(header, contents);
+    try {
+      const diff = await service.readDiff(dir, commit.hash);
+      if (request !== diffRequest) return;
+      contents.replaceChildren(diff.text ? renderDiff(diff.text) : element('p', '', t('commit.emptyDiff')));
+      if (diff.truncated) contents.append(element('p', '', t('commit.truncatedDiff')));
+    } catch {
+      if (request === diffRequest) contents.textContent = t('commit.openFailed');
+    }
+    return;
+  }
+  const current = generation;
+  try {
+    await host.openCommit(commit.hash);
+  } catch (error) {
+    if (current !== generation) return;
     const message = error instanceof HostRequestError
       ? error.code === 'NOT_FOUND' ? t('commit.notFound')
         : error.code === 'UNSUPPORTED' ? t('commit.unsupported')
           : t('common.labelled', { label: error.code, value: error.message })
       : t('commit.openFailed');
     void host.toast({ kind: 'error', message });
-  });
+  }
 };
 
 const copyHash = (commit: Commit, button: HTMLButtonElement) => {
@@ -279,11 +367,18 @@ const renderHistory = () => {
 
 /** Toolbar controls are mounted once; only a locale change rewrites their texts. */
 const renderLabels = () => {
+  repositorySelect.setAttribute('aria-label', t('repositories.label'));
   tabs.update({ items: [{ id: 'all', label: t('tabs.all') }, { id: 'current', label: t('tabs.current') }] });
   search.update({ placeholder: t('search.placeholder') });
 };
 
 const render = () => {
+  repositorySelect.hidden = repositories.length === 0 || (repositories.length === 1 && directory === projectDirectory);
+  if (repositorySelect.options.length !== repositories.length
+    || repositories.some((repo, index) => repositorySelect.options[index]?.value !== repo.directory)) {
+    repositorySelect.replaceChildren(...repositories.map((repo) => new Option(repo.name, repo.directory)));
+  }
+  repositorySelect.value = directory ?? '';
   renderNotice();
   renderHead();
   renderHistory();
@@ -305,11 +400,10 @@ host.onReady((context) => {
 
 let directorySeen = false;
 host.onDirectory((next) => {
-  if (directorySeen && next === directory) return;
+  if (directorySeen && next === projectDirectory) return;
   directorySeen = true;
-  directory = next;
-  resetHistory();
-  void load({ keepCount: false });
+  projectDirectory = next;
+  void discover();
 });
 
 // ----- Watching -----

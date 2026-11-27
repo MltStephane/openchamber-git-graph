@@ -1,5 +1,6 @@
 import type { ConnectorType, GraphRow } from '../graph.ts';
 import type { Ref } from '../log-format.ts';
+import { diffLines } from './diff-lines.ts';
 import { connectorPath, laneColor, laneX, MAX_LANES, ROW_HEIGHT, type DotKind } from './graph-geometry.ts';
 import { t, type MessageKey } from './i18n.ts';
 
@@ -12,6 +13,17 @@ export const STYLE = `
   button { font: inherit; color: inherit; }
   .toolbar { flex: none; display: flex; flex-wrap: wrap; align-items: center; gap: 6px 8px; padding: 8px 8px 6px; }
   .toolbar .search { flex: 1 1 160px; min-width: 120px; }
+  .repositories { width: 100%; border: 1px solid var(--oc-border); border-radius: 5px; padding: 4px 6px; background: var(--oc-bg); color: var(--oc-fg); font: inherit; }
+  .commit-diff { flex: none; max-height: 45vh; overflow: hidden; margin: 4px 8px; border: 1px solid var(--oc-border); border-radius: 5px; }
+  .commit-diff:not([hidden]) { display: flex; flex-direction: column; }
+  .diff-header { flex: none; display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 6px 8px; border-bottom: 1px solid var(--oc-border); }
+  .diff-header strong { overflow-wrap: anywhere; }
+  .diff-contents { min-height: 0; overflow: auto; padding: 6px 8px; }
+  .diff-contents pre { margin: 0; font: 11px/1.4 var(--oc-mono); }
+  .diff-file { color: var(--oc-fg); font-weight: 700; }
+  .diff-hunk { color: var(--oc-info-text); background: color-mix(in srgb, var(--oc-info) 14%, transparent); }
+  .diff-added { color: var(--oc-success-text); background: color-mix(in srgb, var(--oc-success) 14%, transparent); }
+  .diff-removed { color: var(--oc-error-text); background: color-mix(in srgb, var(--oc-error) 14%, transparent); }
   .headinfo { display: flex; align-items: center; gap: 6px; color: var(--oc-muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .headinfo .branch { color: var(--oc-fg); font-weight: 600; }
   .headinfo .dirty { color: var(--oc-warning-text); }
@@ -52,6 +64,16 @@ export const element = <K extends keyof HTMLElementTagNameMap>(tag: K, className
   if (className) node.className = className;
   if (text !== undefined) node.textContent = text;
   return node;
+};
+
+export const renderDiff = (patch: string): HTMLPreElement => {
+  const preview = element('pre');
+  const lines = document.createDocumentFragment();
+  for (const { text, kind } of diffLines(patch)) {
+    lines.append(kind === 'plain' ? text : element('span', `diff-${kind}`, text));
+  }
+  preview.append(lines);
+  return preview;
 };
 
 const svgNode = <K extends keyof SVGElementTagNameMap>(name: K, attributes: Record<string, string | number>): SVGElementTagNameMap[K] => {

@@ -1,7 +1,7 @@
 // src/service.ts
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
-import { stat } from "node:fs/promises";
+import { readdir, stat } from "node:fs/promises";
 import http from "node:http";
 import path from "node:path";
 
@@ -89,16 +89,20 @@ var classifyGitFailure = (error, stderr) => {
   const unknownRevision = /unknown revision|bad revision|ambiguous argument|does not have any commits/i.test(stderr);
   return { ok: false, failure: "git-failed", message: message || "git failed.", unknownRevision };
 };
-var git = (directory, args) => new Promise((resolve) => {
+var git = (directory, args, previewBytes) => new Promise((resolve) => {
   execFile("git", ["-C", directory, "-c", "core.quotepath=off", "-c", "log.showSignature=false", ...args], {
     timeout: 20000,
-    maxBuffer: 32 * 1024 * 1024,
+    maxBuffer: previewBytes ?? 32 * 1024 * 1024,
     env: { ...process.env, GIT_OPTIONAL_LOCKS: "0", GIT_TERMINAL_PROMPT: "0", LC_ALL: "C" }
   }, (error, stdout, stderr) => {
+    if (previewBytes && error?.code === "ERR_CHILD_PROCESS_STDIO_MAXBUFFER" && stdout) {
+      resolve({ ok: true, stdout, truncated: true });
+      return;
+    }
     resolve(error ? classifyGitFailure(error, stderr) : { ok: true, stdout });
   });
 });
-var checkRepository = async (dir) => {
+var checkDirectory = async (dir) => {
   if (!path.isAbsolute(dir) || dir.includes("\x00"))
     return fail("bad-request", "`dir` must be an absolute path.");
   try {
@@ -107,8 +111,36 @@ var checkRepository = async (dir) => {
   } catch {
     return fail("no-directory", `${dir} does not exist.`);
   }
+  return null;
+};
+var checkRepository = async (dir) => {
+  const problem = await checkDirectory(dir);
+  if (problem)
+    return problem;
   const probe = await git(dir, ["rev-parse", "--git-dir"]);
   return probe.ok ? null : fail(probe.failure, probe.message);
+};
+var discoverRepositories = async (dir) => {
+  const problem = await checkDirectory(dir);
+  if (problem)
+    return problem;
+  const repositories = [];
+  const current = await checkRepository(dir);
+  if (!current)
+    repositories.push({ directory: dir, name: path.basename(dir) || dir });
+  else if ("error" in current.body && current.body.error !== "not-a-repo")
+    return current;
+  const entries = await readdir(dir, { withFileTypes: true });
+  for (const entry of entries.sort((a, b) => a.name.localeCompare(b.name))) {
+    if (!entry.isDirectory() || entry.name === ".git")
+      continue;
+    const directory = path.join(dir, entry.name);
+    const marker = await stat(path.join(directory, ".git")).catch(() => null);
+    if (!marker?.isDirectory() && !marker?.isFile() || await checkRepository(directory))
+      continue;
+    repositories.push({ directory, name: entry.name });
+  }
+  return { status: 200, body: { repositories } };
 };
 var parseInteger = (value, fallback, max, min = 0) => {
   const parsed = Number.parseInt(value ?? "", 10);
@@ -160,9 +192,32 @@ var readHead = async (dir) => {
     }
   };
 };
+var readDiff = async (dir, params) => {
+  const sha = params.get("sha") ?? "";
+  if (!/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i.test(sha)) {
+    return fail("bad-request", "`sha` must be a full commit hash.");
+  }
+  const diff = await git(dir, [
+    "show",
+    "--format=",
+    "--no-color",
+    "--no-ext-diff",
+    "--no-textconv",
+    "--diff-merges=first-parent",
+    "--stat",
+    "--patch",
+    `${sha}^{commit}`,
+    "--"
+  ], 200000);
+  if (!diff.ok)
+    return fail(diff.failure, diff.message);
+  return { status: 200, body: { text: diff.stdout, truncated: diff.truncated ?? false } };
+};
 var ROUTES = {
+  "/repositories": discoverRepositories,
   "/log": readLog,
-  "/head": readHead
+  "/head": readHead,
+  "/diff": readDiff
 };
 var server = http.createServer((req, res) => {
   if (req.headers.authorization !== `Bearer ${token}`) {
@@ -180,6 +235,6 @@ var server = http.createServer((req, res) => {
     return;
   }
   const dir = url.searchParams.get("dir") ?? "";
-  checkRepository(dir).then((problem) => problem ?? route(dir, url.searchParams)).catch((error) => fail("git-failed", error instanceof Error ? error.message : String(error))).then((reply) => json(res, reply));
+  (url.pathname === "/repositories" ? Promise.resolve(null) : checkRepository(dir)).then((problem) => problem ?? route(dir, url.searchParams)).catch((error) => fail("git-failed", error instanceof Error ? error.message : String(error))).then((reply) => json(res, reply));
 });
 server.listen(port, "127.0.0.1");

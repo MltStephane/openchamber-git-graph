@@ -85,3 +85,26 @@ describe('readHead', () => {
     expect((await rejection(fakeHost(200, 'null').client.readHead('/repo'))).code).toBe('bad-answer');
   });
 });
+
+describe('readRepositories', () => {
+  test('discovers repositories using the workspace folder, rather than the selected repository', async () => {
+    const repositories = [{ directory: '/workspace/child', name: 'child' }];
+    const { client, requests } = fakeHost(200, JSON.stringify({ repositories }));
+    expect(await client.readRepositories('/workspace')).toEqual(repositories);
+    expect(requests).toEqual([{ method: 'GET', path: '/repositories', query: { dir: '/workspace' } }]);
+  });
+
+  test('rejects a repository entry without a directory', async () => {
+    const { client } = fakeHost(200, JSON.stringify({ repositories: [{ name: 'child' }] }));
+    expect((await rejection(client.readRepositories('/workspace'))).code).toBe('bad-answer');
+  });
+});
+
+describe('readDiff', () => {
+  test('requests the commit diff in the selected repository', async () => {
+    const diff = { text: 'diff --git a/file b/file', truncated: false };
+    const { client, requests } = fakeHost(200, JSON.stringify(diff));
+    expect(await client.readDiff('/workspace/child', COMMIT.hash)).toEqual(diff);
+    expect(requests).toEqual([{ method: 'GET', path: '/diff', query: { dir: '/workspace/child', sha: COMMIT.hash } }]);
+  });
+});
