@@ -12,6 +12,12 @@ export const STYLE = `
   button { font: inherit; color: inherit; }
   .toolbar { flex: none; display: flex; flex-wrap: wrap; align-items: center; gap: 6px 8px; padding: 8px 8px 6px; }
   .toolbar .search { flex: 1 1 160px; min-width: 120px; }
+  .repositories { width: 100%; border: 1px solid var(--oc-border); border-radius: 5px; padding: 4px 6px; background: var(--oc-bg); color: var(--oc-fg); font: inherit; }
+  .commit-diff { flex: none; max-height: 45vh; overflow: auto; margin: 4px 8px; border: 1px solid var(--oc-border); border-radius: 5px; }
+  .diff-header { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 6px 8px; border-bottom: 1px solid var(--oc-border); }
+  .diff-header strong { overflow-wrap: anywhere; }
+  .diff-contents { padding: 6px 8px; }
+  .diff-contents pre { margin: 0; font: 11px/1.4 var(--oc-mono); }
   .headinfo { display: flex; align-items: center; gap: 6px; color: var(--oc-muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .headinfo .branch { color: var(--oc-fg); font-weight: 600; }
   .headinfo .dirty { color: var(--oc-warning-text); }
